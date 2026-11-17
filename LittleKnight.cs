@@ -4,7 +4,8 @@
 //
 // Build (no install needed, uses the C# compiler that ships with Windows): see build.bat / build.sh
 // Written for C# 5 (the csc.exe bundled with .NET Framework 4.x).
-// Preview without locking anything:  LittleKnight.exe --snapshot out.png   /   --gallery out.png
+// PARENT: Ctrl + Alt + N switches to the next painted scene (they also change by themselves every few minutes).
+// Preview without locking anything:  LittleKnight.exe --snapshot out.png   /   --gallery out.png   /   --themes prefix
 
 using System;
 using System.Collections.Generic;
@@ -29,6 +30,7 @@ namespace LittleKnight
             if (args.Length >= 2 && args[0] == "--snapshot") { Scene.Snapshot(args[1]); return; }
             if (args.Length >= 2 && args[0] == "--gallery") { Scene.Gallery(args[1]); return; }
             if (args.Length >= 2 && args[0] == "--mirror") { Scene.Mirror(args[1]); return; }
+            if (args.Length >= 2 && args[0] == "--themes") { Scene.Themes(args[1]); return; }
 
             bool created;
             using (var mutex = new Mutex(true, "LittleKnight_SingleInstance", out created))
@@ -301,6 +303,7 @@ namespace LittleKnight
 
         Harp harp;
         bool cursorHidden;
+        readonly int startTheme = new Random().Next(Scene.ThemeNames.Length);
         string screenLayout = "";
 
         public LockController()
@@ -345,7 +348,7 @@ namespace LittleKnight
             Array.Sort(screens, (x, y) => (y.Primary ? 1 : 0) - (x.Primary ? 1 : 0));
             foreach (var sc in screens)
             {
-                var f = new ScreenForm(this, sc.Bounds, seed);
+                var f = new ScreenForm(this, sc.Bounds, seed, forms.Count > 0 ? forms[0].Scene.Theme : CurrentTheme());
                 f.Scene.Time = time;
                 forms.Add(f);
             }
@@ -354,12 +357,16 @@ namespace LittleKnight
             if (forms.Count > 0) { forms[0].Activate(); Native.SetForegroundWindow(forms[0].Handle); }
         }
 
+        int lastTheme = -1;
+        int CurrentTheme() { return lastTheme >= 0 ? lastTheme : startTheme; }
+
         void Tick()
         {
             double now = clock.Elapsed.TotalSeconds;
             float dt = (float)Math.Min(0.05, now - lastFrame);
             lastFrame = now;
             foreach (var f in forms) { try { f.Scene.Update(dt); } catch { } f.Invalidate(); }
+            if (forms.Count > 0) lastTheme = forms[0].Scene.Theme;
         }
 
         void Guard()
@@ -442,14 +449,24 @@ namespace LittleKnight
 
             if (!isMod) CheckUnlock(vk, now);
             if (unlocked) return;
+            if (vk == 'N' && CtrlAltDown())
+            {
+                foreach (var f in forms) { try { f.Scene.NextTheme(); } catch { } }
+                return;
+            }
             foreach (var f in forms) { try { f.Scene.OnKey(vk); } catch { } }
+        }
+
+        bool CtrlAltDown()
+        {
+            bool ctrl = false, alt = false;
+            foreach (int m in modsDown) { if (IsCtrl(m)) ctrl = true; if (IsAlt(m)) alt = true; }
+            return ctrl && alt;
         }
 
         void CheckUnlock(int vk, double now)
         {
-            bool ctrl = false, alt = false;
-            foreach (int m in modsDown) { if (IsCtrl(m)) ctrl = true; if (IsAlt(m)) alt = true; }
-            if (!ctrl || !alt) { unlockIndex = 0; return; }
+            if (!CtrlAltDown()) { unlockIndex = 0; return; }
 
             if (unlockIndex > 0 && now - unlockLast > 3.0) unlockIndex = 0;
             if (vk == UnlockWord[unlockIndex]) { unlockIndex++; unlockLast = now; }
@@ -486,7 +503,7 @@ namespace LittleKnight
         public bool AllowClose;
         readonly LockController owner;
 
-        public ScreenForm(LockController owner, Rectangle bounds, int seed)
+        public ScreenForm(LockController owner, Rectangle bounds, int seed, int theme)
         {
             this.owner = owner;
             Text = "Little Knight";
@@ -498,7 +515,7 @@ namespace LittleKnight
             BackColor = Color.FromArgb(126, 200, 242);
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.Opaque, true);
-            Scene = new Scene(Math.Max(1, bounds.Width), Math.Max(1, bounds.Height), seed);
+            Scene = new Scene(Math.Max(1, bounds.Width), Math.Max(1, bounds.Height), seed, theme);
         }
 
         protected override void OnPaintBackground(PaintEventArgs e) { }
@@ -1191,7 +1208,7 @@ namespace LittleKnight
         float sq, boardX, boardY, frame;
         Bitmap background;
 
-        public Scene(int w, int h, int seed) { rnd = new Random(seed); Resize(w, h); }
+        public Scene(int w, int h, int seed, int theme = 0) { rnd = new Random(seed); Theme = WrapTheme(theme); Resize(w, h); }
 
         public void Resize(int w, int h)
         {
@@ -1202,6 +1219,7 @@ namespace LittleKnight
             boardX = (float)Math.Floor((w - 8 * sq) / 2f);
             boardY = (float)Math.Floor((h - 8 * sq) / 2f);
             if (background != null) background.Dispose();
+            if (oldBackground != null) { oldBackground.Dispose(); oldBackground = null; }
             background = BuildBackground();
         }
 
@@ -1466,6 +1484,7 @@ namespace LittleKnight
                 p.VX *= 0.95f; p.VY = p.VY * 0.95f + H * 0.5f * dt;
             }
             if (hint != null && Time - hint.Born > hint.Life) hint = null;
+            if (Time - themeSince > ThemeSeconds) NextTheme();
         }
 
         // ---------------------------------------------------------- draw
@@ -1669,161 +1688,19 @@ namespace LittleKnight
         Bitmap BuildBackground()
         {
             var bmp = new Bitmap(W, H, PixelFormat.Format32bppPArgb);
-            var r = new Random(1827); // fixed: same painting on every screen and every run
+            var r = new Random(1827 + Theme * 101); // fixed per theme: same painting on every screen and every run
             float u = H / 1080f;
-            float horizon = H * 0.6f;
-            float side = boardX - frame;
-            float sunX = W - Math.Max(side * 0.45f, W * 0.08f), sunY = horizon - H * 0.15f;
-
-            Color skyTop = Art.C(0x141B45), skyMid = Art.C(0x4B3A7C), skyRose = Art.C(0xC46B8E), skyGold = Art.C(0xF7A76C), skyLow = Art.C(0xFFD592);
-            Color haze = Art.C(0xF0B39A);
-            Color win = Art.C(0xFFD27A), flag = Art.C(0xC8343F);
-
             using (var g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-
-                // sky
-                using (var sky = new LinearGradientBrush(new RectangleF(0, -1, W, horizon + 2), skyTop, skyLow, 90f))
+                switch (Theme)
                 {
-                    var cb = new ColorBlend(5);
-                    cb.Colors = new[] { skyTop, skyMid, skyRose, skyGold, skyLow };
-                    cb.Positions = new[] { 0f, 0.35f, 0.66f, 0.86f, 1f };
-                    sky.InterpolationColors = cb;
-                    g.FillRectangle(sky, 0, 0, W, horizon + 1);
+                    case 1: PaintMeadow(g, r); break;
+                    case 2: PaintWinter(g, r); break;
+                    case 3: PaintSeaside(g, r); break;
+                    default: PaintDusk(g, r); break;
                 }
-                using (var low = new SolidBrush(skyLow)) g.FillRectangle(low, 0, horizon, W, H - horizon);
-
-                // stars, fading toward the glow
-                for (int i = 0; i < 220; i++)
-                {
-                    float x = (float)r.NextDouble() * W, y = (float)Math.Pow(r.NextDouble(), 1.6) * horizon * 0.55f;
-                    int a = Clamp((int)(230 * (1 - y / (horizon * 0.55f))));
-                    float sz = (0.8f + (float)r.NextDouble() * 1.8f) * u;
-                    using (var b = new SolidBrush(Color.FromArgb(a, 255, 247, 225))) g.FillEllipse(b, x - sz / 2, y - sz / 2, sz, sz);
-                    if (r.Next(14) == 0) Glow(g, x, y, sz * 4, Color.FromArgb(a / 3, 255, 240, 200));
-                }
-
-                // crescent moon, opposite the sun
-                float mx = Math.Max(side * 0.3f, W * 0.07f), my = H * 0.13f, mr = H * 0.045f;
-                Glow(g, mx, my, mr * 3.5f, Color.FromArgb(55, 220, 225, 255));
-                using (var mp = new GraphicsPath()) using (var cut = new GraphicsPath())
-                {
-                    mp.AddEllipse(mx - mr, my - mr, 2 * mr, 2 * mr);
-                    cut.AddEllipse(mx - mr * 0.55f, my - mr * 1.15f, 2 * mr, 2 * mr);
-                    using (var reg = new Region(mp))
-                    {
-                        reg.Exclude(cut);
-                        using (var b = new SolidBrush(Art.C(0xFFF6D8))) g.FillRegion(b, reg);
-                    }
-                }
-
-                // setting sun, its halo and rays
-                Glow(g, sunX, sunY, H * 0.55f, Color.FromArgb(120, 255, 190, 110));
-                Glow(g, sunX, sunY, H * 0.2f, Color.FromArgb(170, 255, 220, 150));
-                for (int i = 0; i < 9; i++)
-                {
-                    double ang = Math.PI + 0.25 + i * (Math.PI - 0.5) / 8 + (r.NextDouble() - 0.5) * 0.1;
-                    float len = H * 0.9f, spread = 0.035f;
-                    using (var b = new SolidBrush(Color.FromArgb(16, 255, 236, 190)))
-                        g.FillPolygon(b, new[] { new PointF(sunX, sunY),
-                            new PointF(sunX + (float)Math.Cos(ang - spread) * len, sunY + (float)Math.Sin(ang - spread) * len),
-                            new PointF(sunX + (float)Math.Cos(ang + spread) * len, sunY + (float)Math.Sin(ang + spread) * len) });
-                }
-                float sr = H * 0.065f;
-                using (var b = new LinearGradientBrush(new RectangleF(sunX - sr, sunY - sr, 2 * sr, 2 * sr), Art.C(0xFFF3C4), Art.C(0xFFB867), 90f))
-                    g.FillEllipse(b, sunX - sr, sunY - sr, 2 * sr, 2 * sr);
-
-                // long painted clouds lit from below
-                for (int i = 0; i < 9; i++)
-                {
-                    float cy = horizon * (0.25f + (float)r.NextDouble() * 0.6f);
-                    float t = cy / horizon;
-                    Color top = Color.FromArgb(150, Mix(Art.C(0x6E4F8E), Art.C(0xE58C8E), t));
-                    Color under = Color.FromArgb(170, Mix(Art.C(0xE89AA4), Art.C(0xFFD7A0), t));
-                    Cloud(g, r, (float)r.NextDouble() * W, cy, W * (0.12f + (float)r.NextDouble() * 0.15f), top, under);
-                }
-
-                // birds
-                using (var pen = new Pen(Color.FromArgb(170, 60, 40, 70), Math.Max(1.2f, 2f * u)))
-                    for (int i = 0; i < 6; i++)
-                    {
-                        float bx = sunX - W * 0.04f - (float)r.NextDouble() * W * 0.12f, by = horizon * (0.35f + (float)r.NextDouble() * 0.3f);
-                        float bs = (6 + (float)r.NextDouble() * 6) * u;
-                        g.DrawArc(pen, bx - bs, by, bs, bs * 0.8f, 200, 120);
-                        g.DrawArc(pen, bx, by, bs, bs * 0.8f, 220, 120);
-                    }
-
-                // distant mountain ranges with mist between them
-                var far = MakeRidge(r, 7, 0.55f);
-                FillRidge(g, far, horizon + H * 0.02f, H * 0.2f, Art.C(0xC890A8), Art.C(0xD9A3A6));
-                Mist(g, horizon, H * 0.05f, Color.FromArgb(150, haze));
-
-                var mid = MakeRidge(r, 7, 0.5f);
-                float midBase = horizon + H * 0.08f, midAmp = H * 0.17f;
-                FillRidge(g, mid, midBase, midAmp, Art.C(0x9A6E9C), Art.C(0xB88497));
-                // a far-away castle on the mid range, on the sun side
-                float fcx = W - Math.Max(side * 0.55f, W * 0.12f);
-                float fgy = RidgeY(mid, midBase, midAmp, fcx) + H * 0.01f;
-                Castle(g, fcx, fgy, H * 0.07f, Art.C(0x8E6491), win, flag, false);
-                Mist(g, midBase - H * 0.01f, H * 0.05f, Color.FromArgb(120, haze));
-
-                var near = MakeRidge(r, 6, 0.5f);
-                FillRidge(g, near, horizon + H * 0.16f, H * 0.1f, Art.C(0x6C4E80), Art.C(0x5A4272));
-
-                // lake with the sun reflected in it
-                float lakeY = horizon + H * 0.2f;
-                using (var b = new LinearGradientBrush(new RectangleF(0, lakeY, W, H - lakeY + 1), Art.C(0xC0809A), Art.C(0x3B2E5C), 90f))
-                    g.FillRectangle(b, 0, lakeY, W, H - lakeY);
-                for (int i = 0; i < 26; i++)
-                {
-                    float ry = lakeY + (float)Math.Pow(i / 26.0, 1.3) * (H - lakeY) * 0.8f + 3 * u;
-                    float rw = H * (0.05f + 0.1f * (float)r.NextDouble()) * (1 + i * 0.05f);
-                    float rx = sunX + (float)(r.NextDouble() - 0.5) * H * 0.05f;
-                    using (var b = new SolidBrush(Color.FromArgb(Clamp(170 - i * 5), 255, 222, 160)))
-                        g.FillRectangle(b, rx - rw / 2, ry, rw, Math.Max(1.5f, 2.5f * u));
-                }
-
-                // near hills: castle hill (moon side) and village hill (sun side)
-                Color hillTop = Art.C(0x3A2D58), hillBot = Art.C(0x251C3E);
-                float hillW = Math.Max(side * 1.9f, W * 0.3f);
-                float castleX = Math.Max(side * 0.5f, W * 0.1f), hillTopY = H * 0.68f;
-                using (var b = new LinearGradientBrush(new RectangleF(0, hillTopY, W, H - hillTopY), hillTop, hillBot, 90f))
-                {
-                    g.FillEllipse(b, castleX - hillW * 0.75f, hillTopY, hillW * 1.5f, H * 0.7f);
-                    g.FillEllipse(b, W - hillW * 0.95f, H * 0.76f, hillW * 1.4f, H * 0.6f);
-                }
-
-                Color sil = Art.C(0x2B2147);
-                float cs = Math.Max(H * 0.12f, Math.Min(side * 0.55f, H * 0.3f));
-                Castle(g, castleX, hillTopY + H * 0.012f, cs, sil, win, flag, true);
-
-                // village and wizard tower on the sun side
-                float vx = W - Math.Max(side * 0.75f, W * 0.15f), vgy = H * 0.785f;
-                using (var tp = new GraphicsPath(FillMode.Winding))
-                {
-                    var tip = Tower(tp, vx + cs * 0.5f, vgy + 2, cs * 0.13f, cs * 0.75f);
-                    using (var b = new SolidBrush(sil)) g.FillPath(b, tp);
-                    Pennant(g, tip, cs, sil, flag, false);
-                    Window(g, vx + cs * 0.5f + cs * 0.045f, vgy - cs * 0.6f, cs * 0.04f, cs * 0.07f, win, true);
-                }
-                Cottage(g, vx - cs * 0.15f, vgy + H * 0.008f, cs * 0.28f, sil, win);
-                Cottage(g, vx + cs * 0.75f, vgy + H * 0.012f, cs * 0.22f, sil, win);
-
-                // pine forests at the edges and a dark foreground
-                using (var pb = new SolidBrush(Art.C(0x1E1735)))
-                {
-                    for (int i = 0; i < 16; i++)
-                    {
-                        float px = (float)r.NextDouble() * side * 0.9f;
-                        if (i % 2 == 1) px = W - px;
-                        float ph = H * (0.07f + (float)r.NextDouble() * 0.09f);
-                        Pine(g, px, H * (0.86f + (float)r.NextDouble() * 0.08f), ph, pb);
-                    }
-                }
-                var fg = MakeRidge(r, 6, 0.6f);
-                FillRidge(g, fg, H * 1.0f, H * 0.08f, Art.C(0x1A142E), Art.C(0x120E22));
 
                 // painterly grain
                 var gr = new Random(7);
@@ -1834,85 +1711,1151 @@ namespace LittleKnight
                         g.FillRectangle(i % 2 == 0 ? lb : db, gr.Next(W), gr.Next(H), 2 * u, 2 * u);
 
                 // vignette
+                Color vig = VignetteFor(Theme);
                 using (var vp = new GraphicsPath())
                 {
                     vp.AddEllipse(-W * 0.22f, -H * 0.22f, W * 1.44f, H * 1.44f);
                     using (var vb = new PathGradientBrush(vp))
                     {
-                        vb.CenterColor = Color.FromArgb(0, 10, 5, 25);
-                        vb.SurroundColors = new[] { Color.FromArgb(150, 10, 5, 25) };
+                        vb.CenterColor = Color.FromArgb(0, vig);
+                        vb.SurroundColors = new[] { vig };
                         vb.FocusScales = new PointF(0.55f, 0.5f);
                         g.FillRectangle(vb, 0, 0, W, H);
                     }
                 }
 
-                // ---- the board: carved walnut with gold inlay
-                var fr = new RectangleF(boardX - frame, boardY - frame, 8 * sq + 2 * frame, 8 * sq + 2 * frame);
-                using (var shadowPath = Art.RRect(fr.X + frame * 0.3f, fr.Y + frame * 0.45f, fr.Width, fr.Height, frame * 0.7f))
-                using (var shadow = new SolidBrush(Color.FromArgb(120, 5, 0, 15)))
-                    g.FillPath(shadow, shadowPath);
-                using (var framePath = Art.RRect(fr.X, fr.Y, fr.Width, fr.Height, frame * 0.7f))
-                using (var fb = new LinearGradientBrush(fr, Art.C(0x7A4B2A), Art.C(0x4A2914), 60f))
-                    g.FillPath(fb, framePath);
-                // wood grain
-                using (var grain = new Pen(Color.FromArgb(28, 0, 0, 0), Math.Max(1f, u)))
-                using (var framePath = Art.RRect(fr.X, fr.Y, fr.Width, fr.Height, frame * 0.7f))
-                {
-                    g.SetClip(framePath);
-                    for (float y = fr.Y + 3; y < fr.Bottom; y += 5 * u + (float)r.NextDouble() * 6 * u)
-                        g.DrawBezier(grain, fr.X, y, fr.X + fr.Width * 0.3f, y + (float)(r.NextDouble() - 0.5) * 8 * u,
-                                     fr.X + fr.Width * 0.7f, y + (float)(r.NextDouble() - 0.5) * 8 * u, fr.Right, y);
-                    g.ResetClip();
-                }
-                Color gold = Art.C(0xE2B455);
-                float inset = frame * 0.18f;
-                using (var gp = new Pen(gold, Math.Max(1.5f, frame * 0.07f)))
-                using (var path = Art.RRect(fr.X + inset, fr.Y + inset, fr.Width - 2 * inset, fr.Height - 2 * inset, frame * 0.55f))
-                    g.DrawPath(gp, path);
-                // gold diamonds in the corners
-                using (var gb = new SolidBrush(gold))
-                {
-                    float d = frame * 0.28f;
-                    foreach (var c in new[] { new PointF(fr.X + frame / 2, fr.Y + frame / 2), new PointF(fr.Right - frame / 2, fr.Y + frame / 2),
-                                              new PointF(fr.X + frame / 2, fr.Bottom - frame / 2), new PointF(fr.Right - frame / 2, fr.Bottom - frame / 2) })
-                        g.FillPolygon(gb, new[] { new PointF(c.X, c.Y - d), new PointF(c.X + d, c.Y), new PointF(c.X, c.Y + d), new PointF(c.X - d, c.Y) });
-                }
-
-                // squares: parchment and warm oak
-                using (var boardPath = Art.RRect(boardX, boardY, 8 * sq, 8 * sq, frame * 0.25f))
-                {
-                    g.SetClip(boardPath);
-                    using (var lightSq = new SolidBrush(Art.C(0xF3E3C0)))
-                    using (var darkSq = new SolidBrush(Art.C(0xB98A5C)))
-                        for (int row = 0; row < 8; row++)
-                            for (int col = 0; col < 8; col++)
-                                g.FillRectangle((row + col) % 2 == 0 ? lightSq : darkSq, boardX + col * sq, boardY + row * sq, sq + 1, sq + 1);
-                    // soft inner shading so the squares look inlaid
-                    using (var ib = new LinearGradientBrush(new RectangleF(boardX, boardY, 8 * sq, 8 * sq), Color.FromArgb(0, 0, 0, 0), Color.FromArgb(35, 60, 20, 0), 90f))
-                        g.FillRectangle(ib, boardX, boardY, 8 * sq, 8 * sq);
-                    g.ResetClip();
-                }
-                using (var gp = new Pen(gold, Math.Max(1.5f, frame * 0.06f)))
-                using (var path = Art.RRect(boardX, boardY, 8 * sq, 8 * sq, frame * 0.25f))
-                    g.DrawPath(gp, path);
-
-                // a-h, 1-8 in gold
-                FontFamily serif = Art.Find("Georgia", "Times New Roman");
-                using (var f = new Font(serif, Math.Max(6, frame * 0.5f), FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var tb = new SolidBrush(Art.C(0xF0CF83)))
-                using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                {
-                    for (int i = 0; i < 8; i++)
-                    {
-                        string file = ((char)('a' + i)).ToString(), rank = (8 - i).ToString();
-                        g.DrawString(file, f, tb, boardX + (i + 0.5f) * sq, boardY + 8 * sq + frame / 2f, sf);
-                        g.DrawString(file, f, tb, boardX + (i + 0.5f) * sq, boardY - frame / 2f, sf);
-                        g.DrawString(rank, f, tb, boardX - frame / 2f, boardY + (i + 0.5f) * sq, sf);
-                        g.DrawString(rank, f, tb, boardX + 8 * sq + frame / 2f, boardY + (i + 0.5f) * sq, sf);
-                    }
-                }
+                PaintBoard(g, r, BoardFor(Theme));
             }
             return bmp;
+        }
+
+        // ---- theme 0: medieval dusk
+        void PaintDusk(Graphics g, Random r)
+        {
+            float u = H / 1080f;
+            float horizon = H * 0.6f;
+            float side = boardX - frame;
+            float sunX = W - Math.Max(side * 0.45f, W * 0.08f), sunY = horizon - H * 0.15f;
+
+            Color skyTop = Art.C(0x141B45), skyMid = Art.C(0x4B3A7C), skyRose = Art.C(0xC46B8E), skyGold = Art.C(0xF7A76C), skyLow = Art.C(0xFFD592);
+            Color haze = Art.C(0xF0B39A);
+            Color win = Art.C(0xFFD27A), flag = Art.C(0xC8343F);
+
+            // sky
+            using (var sky = new LinearGradientBrush(new RectangleF(0, -1, W, horizon + 2), skyTop, skyLow, 90f))
+            {
+                var cb = new ColorBlend(5);
+                cb.Colors = new[] { skyTop, skyMid, skyRose, skyGold, skyLow };
+                cb.Positions = new[] { 0f, 0.35f, 0.66f, 0.86f, 1f };
+                sky.InterpolationColors = cb;
+                g.FillRectangle(sky, 0, 0, W, horizon + 1);
+            }
+            using (var low = new SolidBrush(skyLow)) g.FillRectangle(low, 0, horizon, W, H - horizon);
+
+            // stars, fading toward the glow
+            for (int i = 0; i < 220; i++)
+            {
+                float x = (float)r.NextDouble() * W, y = (float)Math.Pow(r.NextDouble(), 1.6) * horizon * 0.55f;
+                int a = Clamp((int)(230 * (1 - y / (horizon * 0.55f))));
+                float sz = (0.8f + (float)r.NextDouble() * 1.8f) * u;
+                using (var b = new SolidBrush(Color.FromArgb(a, 255, 247, 225))) g.FillEllipse(b, x - sz / 2, y - sz / 2, sz, sz);
+                if (r.Next(14) == 0) Glow(g, x, y, sz * 4, Color.FromArgb(a / 3, 255, 240, 200));
+            }
+
+            // crescent moon, opposite the sun
+            float mx = Math.Max(side * 0.3f, W * 0.07f), my = H * 0.13f, mr = H * 0.045f;
+            Glow(g, mx, my, mr * 3.5f, Color.FromArgb(55, 220, 225, 255));
+            using (var mp = new GraphicsPath()) using (var cut = new GraphicsPath())
+            {
+                mp.AddEllipse(mx - mr, my - mr, 2 * mr, 2 * mr);
+                cut.AddEllipse(mx - mr * 0.55f, my - mr * 1.15f, 2 * mr, 2 * mr);
+                using (var reg = new Region(mp))
+                {
+                    reg.Exclude(cut);
+                    using (var b = new SolidBrush(Art.C(0xFFF6D8))) g.FillRegion(b, reg);
+                }
+            }
+
+            // setting sun, its halo and rays
+            Glow(g, sunX, sunY, H * 0.55f, Color.FromArgb(120, 255, 190, 110));
+            Glow(g, sunX, sunY, H * 0.2f, Color.FromArgb(170, 255, 220, 150));
+            for (int i = 0; i < 9; i++)
+            {
+                double ang = Math.PI + 0.25 + i * (Math.PI - 0.5) / 8 + (r.NextDouble() - 0.5) * 0.1;
+                float len = H * 0.9f, spread = 0.035f;
+                using (var b = new SolidBrush(Color.FromArgb(16, 255, 236, 190)))
+                    g.FillPolygon(b, new[] { new PointF(sunX, sunY),
+                        new PointF(sunX + (float)Math.Cos(ang - spread) * len, sunY + (float)Math.Sin(ang - spread) * len),
+                        new PointF(sunX + (float)Math.Cos(ang + spread) * len, sunY + (float)Math.Sin(ang + spread) * len) });
+            }
+            float sr = H * 0.065f;
+            using (var b = new LinearGradientBrush(new RectangleF(sunX - sr, sunY - sr, 2 * sr, 2 * sr), Art.C(0xFFF3C4), Art.C(0xFFB867), 90f))
+                g.FillEllipse(b, sunX - sr, sunY - sr, 2 * sr, 2 * sr);
+
+            // long painted clouds lit from below
+            for (int i = 0; i < 9; i++)
+            {
+                float cy = horizon * (0.25f + (float)r.NextDouble() * 0.6f);
+                float t = cy / horizon;
+                Color top = Color.FromArgb(150, Mix(Art.C(0x6E4F8E), Art.C(0xE58C8E), t));
+                Color under = Color.FromArgb(170, Mix(Art.C(0xE89AA4), Art.C(0xFFD7A0), t));
+                Cloud(g, r, (float)r.NextDouble() * W, cy, W * (0.12f + (float)r.NextDouble() * 0.15f), top, under);
+            }
+
+            // birds
+            using (var pen = new Pen(Color.FromArgb(170, 60, 40, 70), Math.Max(1.2f, 2f * u)))
+                for (int i = 0; i < 6; i++)
+                {
+                    float bx = sunX - W * 0.04f - (float)r.NextDouble() * W * 0.12f, by = horizon * (0.35f + (float)r.NextDouble() * 0.3f);
+                    float bs = (6 + (float)r.NextDouble() * 6) * u;
+                    g.DrawArc(pen, bx - bs, by, bs, bs * 0.8f, 200, 120);
+                    g.DrawArc(pen, bx, by, bs, bs * 0.8f, 220, 120);
+                }
+
+            // distant mountain ranges with mist between them
+            var far = MakeRidge(r, 7, 0.55f);
+            FillRidge(g, far, horizon + H * 0.02f, H * 0.2f, Art.C(0xC890A8), Art.C(0xD9A3A6));
+            Mist(g, horizon, H * 0.05f, Color.FromArgb(150, haze));
+
+            var mid = MakeRidge(r, 7, 0.5f);
+            float midBase = horizon + H * 0.08f, midAmp = H * 0.17f;
+            FillRidge(g, mid, midBase, midAmp, Art.C(0x9A6E9C), Art.C(0xB88497));
+            // a far-away castle on the mid range, on the sun side
+            float fcx = W - Math.Max(side * 0.55f, W * 0.12f);
+            float fgy = RidgeY(mid, midBase, midAmp, fcx) + H * 0.01f;
+            Castle(g, fcx, fgy, H * 0.07f, Art.C(0x8E6491), win, flag, false);
+            Mist(g, midBase - H * 0.01f, H * 0.05f, Color.FromArgb(120, haze));
+
+            var near = MakeRidge(r, 6, 0.5f);
+            FillRidge(g, near, horizon + H * 0.16f, H * 0.1f, Art.C(0x6C4E80), Art.C(0x5A4272));
+
+            // lake with the sun reflected in it
+            float lakeY = horizon + H * 0.2f;
+            using (var b = new LinearGradientBrush(new RectangleF(0, lakeY, W, H - lakeY + 1), Art.C(0xC0809A), Art.C(0x3B2E5C), 90f))
+                g.FillRectangle(b, 0, lakeY, W, H - lakeY);
+            for (int i = 0; i < 26; i++)
+            {
+                float ry = lakeY + (float)Math.Pow(i / 26.0, 1.3) * (H - lakeY) * 0.8f + 3 * u;
+                float rw = H * (0.05f + 0.1f * (float)r.NextDouble()) * (1 + i * 0.05f);
+                float rx = sunX + (float)(r.NextDouble() - 0.5) * H * 0.05f;
+                using (var b = new SolidBrush(Color.FromArgb(Clamp(170 - i * 5), 255, 222, 160)))
+                    g.FillRectangle(b, rx - rw / 2, ry, rw, Math.Max(1.5f, 2.5f * u));
+            }
+
+            // near hills: castle hill (moon side) and village hill (sun side)
+            Color hillTop = Art.C(0x3A2D58), hillBot = Art.C(0x251C3E);
+            float hillW = Math.Max(side * 1.9f, W * 0.3f);
+            float castleX = Math.Max(side * 0.5f, W * 0.1f), hillTopY = H * 0.68f;
+            using (var b = new LinearGradientBrush(new RectangleF(0, hillTopY, W, H - hillTopY), hillTop, hillBot, 90f))
+            {
+                g.FillEllipse(b, castleX - hillW * 0.75f, hillTopY, hillW * 1.5f, H * 0.7f);
+                g.FillEllipse(b, W - hillW * 0.95f, H * 0.76f, hillW * 1.4f, H * 0.6f);
+            }
+
+            Color sil = Art.C(0x2B2147);
+            float cs = Math.Max(H * 0.12f, Math.Min(side * 0.55f, H * 0.3f));
+            Castle(g, castleX, hillTopY + H * 0.012f, cs, sil, win, flag, true);
+
+            // village and wizard tower on the sun side
+            float vx = W - Math.Max(side * 0.75f, W * 0.15f), vgy = H * 0.785f;
+            using (var tp = new GraphicsPath(FillMode.Winding))
+            {
+                var tip = Tower(tp, vx + cs * 0.5f, vgy + 2, cs * 0.13f, cs * 0.75f);
+                using (var b = new SolidBrush(sil)) g.FillPath(b, tp);
+                Pennant(g, tip, cs, sil, flag, false);
+                Window(g, vx + cs * 0.5f + cs * 0.045f, vgy - cs * 0.6f, cs * 0.04f, cs * 0.07f, win, true);
+            }
+            Cottage(g, vx - cs * 0.15f, vgy + H * 0.008f, cs * 0.28f, sil, win);
+            Cottage(g, vx + cs * 0.75f, vgy + H * 0.012f, cs * 0.22f, sil, win);
+
+            // pine forests at the edges and a dark foreground
+            using (var pb = new SolidBrush(Art.C(0x1E1735)))
+            {
+                for (int i = 0; i < 16; i++)
+                {
+                    float px = (float)r.NextDouble() * side * 0.9f;
+                    if (i % 2 == 1) px = W - px;
+                    float ph = H * (0.07f + (float)r.NextDouble() * 0.09f);
+                    Pine(g, px, H * (0.86f + (float)r.NextDouble() * 0.08f), ph, pb);
+                }
+            }
+            var fg = MakeRidge(r, 6, 0.6f);
+            FillRidge(g, fg, H * 1.0f, H * 0.08f, Art.C(0x1A142E), Art.C(0x120E22));
+        }
+
+        // ---- the board, in the theme's woods and colors
+        void PaintBoard(Graphics g, Random r, BoardStyle bs)
+        {
+            float u = H / 1080f;
+            // frame with grain and inlay
+            var fr = new RectangleF(boardX - frame, boardY - frame, 8 * sq + 2 * frame, 8 * sq + 2 * frame);
+            using (var shadowPath = Art.RRect(fr.X + frame * 0.3f, fr.Y + frame * 0.45f, fr.Width, fr.Height, frame * 0.7f))
+            using (var shadow = new SolidBrush(bs.Shadow))
+                g.FillPath(shadow, shadowPath);
+            using (var framePath = Art.RRect(fr.X, fr.Y, fr.Width, fr.Height, frame * 0.7f))
+            using (var fb = new LinearGradientBrush(fr, bs.FrameTop, bs.FrameBottom, 60f))
+                g.FillPath(fb, framePath);
+            // wood grain
+            using (var grain = new Pen(bs.Grain, Math.Max(1f, u)))
+            using (var framePath = Art.RRect(fr.X, fr.Y, fr.Width, fr.Height, frame * 0.7f))
+            {
+                g.SetClip(framePath);
+                for (float y = fr.Y + 3; y < fr.Bottom; y += 5 * u + (float)r.NextDouble() * 6 * u)
+                    g.DrawBezier(grain, fr.X, y, fr.X + fr.Width * 0.3f, y + (float)(r.NextDouble() - 0.5) * 8 * u,
+                                 fr.X + fr.Width * 0.7f, y + (float)(r.NextDouble() - 0.5) * 8 * u, fr.Right, y);
+                g.ResetClip();
+            }
+            Color gold = bs.Inlay;
+            float inset = frame * 0.18f;
+            using (var gp = new Pen(gold, Math.Max(1.5f, frame * 0.07f)))
+            using (var path = Art.RRect(fr.X + inset, fr.Y + inset, fr.Width - 2 * inset, fr.Height - 2 * inset, frame * 0.55f))
+                g.DrawPath(gp, path);
+            // gold diamonds in the corners
+            using (var gb = new SolidBrush(gold))
+            {
+                float d = frame * 0.28f;
+                foreach (var c in new[] { new PointF(fr.X + frame / 2, fr.Y + frame / 2), new PointF(fr.Right - frame / 2, fr.Y + frame / 2),
+                                          new PointF(fr.X + frame / 2, fr.Bottom - frame / 2), new PointF(fr.Right - frame / 2, fr.Bottom - frame / 2) })
+                    g.FillPolygon(gb, new[] { new PointF(c.X, c.Y - d), new PointF(c.X + d, c.Y), new PointF(c.X, c.Y + d), new PointF(c.X - d, c.Y) });
+            }
+
+            // squares
+            using (var boardPath = Art.RRect(boardX, boardY, 8 * sq, 8 * sq, frame * 0.25f))
+            {
+                g.SetClip(boardPath);
+                using (var lightSq = new SolidBrush(bs.Light))
+                using (var darkSq = new SolidBrush(bs.Dark))
+                    for (int row = 0; row < 8; row++)
+                        for (int col = 0; col < 8; col++)
+                            g.FillRectangle((row + col) % 2 == 0 ? lightSq : darkSq, boardX + col * sq, boardY + row * sq, sq + 1, sq + 1);
+                // soft inner shading so the squares look inlaid
+                using (var ib = new LinearGradientBrush(new RectangleF(boardX, boardY, 8 * sq, 8 * sq), Color.FromArgb(0, 0, 0, 0), bs.Shade, 90f))
+                    g.FillRectangle(ib, boardX, boardY, 8 * sq, 8 * sq);
+                g.ResetClip();
+            }
+            using (var gp = new Pen(gold, Math.Max(1.5f, frame * 0.06f)))
+            using (var path = Art.RRect(boardX, boardY, 8 * sq, 8 * sq, frame * 0.25f))
+                g.DrawPath(gp, path);
+
+            // a-h, 1-8 in gold
+            FontFamily serif = Art.Find("Georgia", "Times New Roman");
+            using (var f = new Font(serif, Math.Max(6, frame * 0.5f), FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var tb = new SolidBrush(bs.Label))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+            {
+                for (int i = 0; i < 8; i++)
+                {
+                    string file = ((char)('a' + i)).ToString(), rank = (8 - i).ToString();
+                    g.DrawString(file, f, tb, boardX + (i + 0.5f) * sq, boardY + 8 * sq + frame / 2f, sf);
+                    g.DrawString(file, f, tb, boardX + (i + 0.5f) * sq, boardY - frame / 2f, sf);
+                    g.DrawString(rank, f, tb, boardX - frame / 2f, boardY + (i + 0.5f) * sq, sf);
+                    g.DrawString(rank, f, tb, boardX + 8 * sq + frame / 2f, boardY + (i + 0.5f) * sq, sf);
+                }
+            }
+        }
+
+        // ---------------------------------------------------------- themes
+        public class BoardStyle { public Color FrameTop, FrameBottom, Grain, Inlay, Light, Dark, Shade, Label, Shadow; }
+
+        static BoardStyle BoardFor(int theme)
+        {
+            switch (theme)
+            {
+                case 1: // garden: honey oak, cream and leaf green
+                    return new BoardStyle { FrameTop = Art.C(0xD9A766), FrameBottom = Art.C(0x9C6A35), Grain = Color.FromArgb(34, 90, 50, 10),
+                        Inlay = Art.C(0x3F8F3A), Light = Art.C(0xFBF5E1), Dark = Art.C(0x93C46E), Shade = Color.FromArgb(30, 20, 60, 0),
+                        Label = Art.C(0xFFF6DA), Shadow = Color.FromArgb(90, 20, 60, 10) };
+                case 2: // frost: silver ice, snow and frozen blue
+                    return new BoardStyle { FrameTop = Art.C(0xD3E0F2), FrameBottom = Art.C(0x7F95C2), Grain = Color.FromArgb(45, 255, 255, 255),
+                        Inlay = Color.White, Light = Art.C(0xF7FAFF), Dark = Art.C(0x9FB8DF), Shade = Color.FromArgb(35, 20, 40, 90),
+                        Label = Art.C(0x2A3A6E), Shadow = Color.FromArgb(120, 5, 10, 40) };
+                case 3: // driftwood: sand and sea glass
+                    return new BoardStyle { FrameTop = Art.C(0xA88664), FrameBottom = Art.C(0x6B4F36), Grain = Color.FromArgb(40, 40, 25, 10),
+                        Inlay = Art.C(0xF3E6C8), Light = Art.C(0xF8EBCF), Dark = Art.C(0x6DB5C2), Shade = Color.FromArgb(30, 0, 40, 60),
+                        Label = Art.C(0xFFF0D2), Shadow = Color.FromArgb(110, 10, 30, 50) };
+                default: // carved walnut with gold inlay
+                    return new BoardStyle { FrameTop = Art.C(0x7A4B2A), FrameBottom = Art.C(0x4A2914), Grain = Color.FromArgb(28, 0, 0, 0),
+                        Inlay = Art.C(0xE2B455), Light = Art.C(0xF3E3C0), Dark = Art.C(0xB98A5C), Shade = Color.FromArgb(35, 60, 20, 0),
+                        Label = Art.C(0xF0CF83), Shadow = Color.FromArgb(120, 5, 0, 15) };
+            }
+        }
+
+        static Color VignetteFor(int theme)
+        {
+            switch (theme)
+            {
+                case 1: return Color.FromArgb(70, 20, 60, 30);
+                case 2: return Color.FromArgb(150, 5, 10, 40);
+                case 3: return Color.FromArgb(80, 20, 40, 70);
+                default: return Color.FromArgb(150, 10, 5, 25);
+            }
+        }
+
+        // ---- shared painting helpers
+        static void FillPoly(Graphics g, Color c, params float[] xy)
+        {
+            var pts = new PointF[xy.Length / 2];
+            for (int i = 0; i < pts.Length; i++) pts[i] = new PointF(xy[2 * i], xy[2 * i + 1]);
+            using (var b = new SolidBrush(c)) g.FillPolygon(b, pts);
+        }
+
+        static void FillCircle(Graphics g, Color c, float x, float y, float r)
+        {
+            using (var b = new SolidBrush(c)) g.FillEllipse(b, x - r, y - r, 2 * r, 2 * r);
+        }
+
+        static void FillRect(Graphics g, Color c, float x, float y, float w, float h)
+        {
+            using (var b = new SolidBrush(c)) g.FillRectangle(b, x, y, w, h);
+        }
+
+        void Sky(Graphics g, float bottom, Color[] cols, float[] pos)
+        {
+            using (var sky = new LinearGradientBrush(new RectangleF(0, -1, W, bottom + 2), cols[0], cols[cols.Length - 1], 90f))
+            {
+                var cb = new ColorBlend(cols.Length);
+                cb.Colors = cols; cb.Positions = pos;
+                sky.InterpolationColors = cb;
+                g.FillRectangle(sky, 0, 0, W, bottom + 1);
+            }
+            FillRect(g, cols[cols.Length - 1], 0, bottom, W, H - bottom);
+        }
+
+        // vertical gradient with color stops at absolute y positions (first stop = top of the shape)
+        static LinearGradientBrush Stops(float x, float w, Color[] cols, float[] ys)
+        {
+            float y0 = ys[0], y1 = ys[ys.Length - 1];
+            var b = new LinearGradientBrush(new RectangleF(x, y0 - 1, w, y1 - y0 + 2), cols[0], cols[cols.Length - 1], 90f);
+            var cb = new ColorBlend(cols.Length);
+            var pos = new float[ys.Length];
+            for (int i = 0; i < ys.Length; i++) pos[i] = Math.Max(0, Math.Min(1, (ys[i] - y0 + 1) / (y1 - y0 + 2)));
+            pos[0] = 0; pos[pos.Length - 1] = 1;
+            cb.Colors = cols; cb.Positions = pos;
+            b.InterpolationColors = cb;
+            return b;
+        }
+
+        // ridge whose colors change with height (snowy peaks, sunlit tops...)
+        void FillRidgeStops(Graphics g, float[] h, float baseY, float amp, Color[] cols, float[] fractions)
+        {
+            var pts = new PointF[h.Length + 2];
+            for (int i = 0; i < h.Length; i++) pts[i] = new PointF(W * i / (float)(h.Length - 1), baseY - h[i] * amp);
+            pts[h.Length] = new PointF(W, H + 2); pts[h.Length + 1] = new PointF(0, H + 2);
+            var ys = new float[fractions.Length];
+            for (int i = 0; i < ys.Length; i++) ys[i] = baseY - amp + fractions[i] * (H + 2 - baseY + amp);
+            using (var b = Stops(0, W, cols, ys)) g.FillPolygon(b, pts);
+        }
+
+        // an island / headland: a ridge that only rises between x0 and x1 and sits on baseY
+        void Island(Graphics g, Random r, float x0, float x1, float baseY, float amp, Color top, Color bottom)
+        {
+            var h = MakeRidge(r, 5, 0.5f);
+            var pts = new PointF[h.Length + 2];
+            for (int i = 0; i < h.Length; i++)
+            {
+                float t = i / (float)(h.Length - 1);
+                float env = (float)Math.Pow(Math.Sin(Math.PI * t), 0.7);
+                pts[i] = new PointF(x0 + (x1 - x0) * t, baseY - (0.35f + 0.65f * h[i]) * amp * env);
+            }
+            pts[h.Length] = new PointF(x1, baseY + 2); pts[h.Length + 1] = new PointF(x0, baseY + 2);
+            using (var b = new LinearGradientBrush(new RectangleF(x0, baseY - amp - 1, x1 - x0 + 1, amp + 4), top, bottom, 90f))
+                g.FillPolygon(b, pts);
+        }
+
+        void PuffCloud(Graphics g, Random r, float x, float y, float s, Color top, Color shade)
+        {
+            int n = 5 + r.Next(3);
+            var cs = new float[n * 3];
+            for (int i = 0; i < n; i++)
+            {
+                float t = i / (float)(n - 1);
+                float rad = s * (0.22f + 0.26f * (float)Math.Sin(Math.PI * t) + 0.08f * (float)r.NextDouble());
+                cs[3 * i] = x + (t - 0.5f) * s * 1.5f; cs[3 * i + 1] = y - rad * 0.5f; cs[3 * i + 2] = rad;
+            }
+            using (var sb = new SolidBrush(shade))
+            {
+                g.FillEllipse(sb, x - s * 0.95f, y - s * 0.14f, s * 1.9f, s * 0.3f);
+                for (int i = 0; i < n; i++) g.FillEllipse(sb, cs[3 * i] - cs[3 * i + 2], cs[3 * i + 1] - cs[3 * i + 2] + s * 0.05f, 2 * cs[3 * i + 2], 2 * cs[3 * i + 2]);
+            }
+            using (var tb = new SolidBrush(top))
+                for (int i = 0; i < n; i++)
+                {
+                    float rad = cs[3 * i + 2] * 0.94f;
+                    g.FillEllipse(tb, cs[3 * i] - rad - s * 0.02f, cs[3 * i + 1] - rad - s * 0.03f, 2 * rad, 2 * rad);
+                }
+        }
+
+        static void Birds(Graphics g, Random r, float x0, float x1, float y0, float y1, int n, Color c, float u)
+        {
+            using (var pen = new Pen(c, Math.Max(1.2f, 2f * u)))
+                for (int i = 0; i < n; i++)
+                {
+                    float bx = x0 + (float)r.NextDouble() * (x1 - x0), by = y0 + (float)r.NextDouble() * (y1 - y0);
+                    float bs = (6 + (float)r.NextDouble() * 6) * u;
+                    g.DrawArc(pen, bx - bs, by, bs, bs * 0.8f, 200, 120);
+                    g.DrawArc(pen, bx, by, bs, bs * 0.8f, 220, 120);
+                }
+        }
+
+        // a sunlit castle: stone walls, shaded sides, colored cone roofs (snow roofs in winter)
+        void CastleLit(Graphics g, float cx, float gy, float s, Color stone, Color shade, Color roof, Color roofShade,
+                       Color win, Color flag, Color cap, bool glowWin, bool detail)
+        {
+            float m = 0.06f * s;
+            using (var walls = new GraphicsPath(FillMode.Winding))
+            {
+                Battlement(walls, cx - 0.62f * s, gy - 0.3f * s, 1.24f * s, 0.3f * s + 2, m);
+                Battlement(walls, cx - 0.26f * s, gy - 0.62f * s, 0.52f * s, 0.62f * s, m);
+                using (var b = new SolidBrush(stone)) g.FillPath(b, walls);
+            }
+            FillRect(g, shade, cx + 0.13f * s, gy - 0.62f * s, 0.13f * s, 0.62f * s - 0.3f * s);
+            FillRect(g, Color.FromArgb(120, shade), cx - 0.62f * s, gy - 0.3f * s, 1.24f * s, 0.03f * s);
+            if (cap.A > 0) { BattlementCaps(g, cap, cx - 0.62f * s, gy - 0.3f * s, 1.24f * s, m); BattlementCaps(g, cap, cx - 0.26f * s, gy - 0.62f * s, 0.52f * s, m); }
+
+            if (detail)
+            {
+                // stone courses
+                using (var pen = new Pen(Color.FromArgb(70, shade), Math.Max(1f, s * 0.006f)))
+                {
+                    for (float y = gy - 0.05f * s; y > gy - 0.28f * s; y -= 0.055f * s)
+                        for (float x = cx - 0.6f * s + ((int)((gy - y) / (0.055f * s)) % 2) * 0.05f * s; x < cx + 0.58f * s; x += 0.1f * s)
+                            g.DrawLine(pen, x, y, x + 0.06f * s, y);
+                }
+            }
+
+            float[] tx = { -0.7f, 0.5f, -0.4f, 0.25f, -0.09f }, tw = { 0.2f, 0.2f, 0.15f, 0.15f, 0.18f }, th = { 0.56f, 0.56f, 0.78f, 0.72f, 1.02f };
+            var tips = new List<PointF>();
+            for (int i = 0; i < 5; i++)
+            {
+                float x = cx + tx[i] * s, w = tw[i] * s, h = th[i] * s;
+                FillRect(g, stone, x, gy - h, w, h);
+                FillRect(g, shade, x + w * 0.62f, gy - h, w * 0.38f, h);
+                FillRect(g, Art.Dark(stone, 0.88f), x - w * 0.08f, gy - h - w * 0.12f, w * 1.16f, w * 0.14f);
+                FillRect(g, Art.Dark(shade, 0.88f), x + w * 0.62f, gy - h - w * 0.12f, w * 0.54f, w * 0.14f);
+                if (cap.A > 0) FillRect(g, cap, x - w * 0.1f, gy - h - w * 0.14f, w * 1.2f, w * 0.06f);
+                var tip = new PointF(x + w / 2, gy - h - w * 1.5f);
+                FillPoly(g, roof, x - w * 0.16f, gy - h - w * 0.1f, x + w * 1.16f, gy - h - w * 0.1f, tip.X, tip.Y);
+                FillPoly(g, roofShade, tip.X, tip.Y, x + w * 0.5f, gy - h - w * 0.1f, x + w * 1.16f, gy - h - w * 0.1f);
+                tips.Add(tip);
+                if (detail && h > 0.6f * s) Window(g, x + w * 0.5f - 0.02f * s, gy - h * 0.72f, 0.04f * s, 0.08f * s, win, glowWin);
+            }
+
+            if (detail)
+            {
+                float gw = 0.16f * s, gh = 0.2f * s;
+                if (glowWin) Glow(g, cx, gy - gh * 0.4f, gh * 1.8f, Color.FromArgb(110, win));
+                Window(g, cx - gw / 2 - 0.015f * s, gy - gh - 0.015f * s, gw + 0.03f * s, gh + 0.015f * s, Art.Dark(stone, 0.75f), false);
+                Window(g, cx - gw / 2, gy - gh, gw, gh, glowWin ? Mix(win, stone, 0.25f) : Art.C(0x6B4428), false);
+                using (var pen = new Pen(Color.FromArgb(150, glowWin ? shade : Art.C(0x3A2414)), Math.Max(1f, s * 0.008f)))
+                    for (int i = 1; i < 4; i++) g.DrawLine(pen, cx - gw / 2 + gw * i / 4f, gy - gh * 0.85f, cx - gw / 2 + gw * i / 4f, gy);
+                float ww = 0.035f * s, wh = 0.07f * s;
+                Window(g, cx - 0.17f * s, gy - 0.5f * s, ww, wh, win, glowWin);
+                Window(g, cx + 0.13f * s, gy - 0.5f * s, ww, wh, win, glowWin);
+                Window(g, cx - ww / 2, gy - 0.86f * s, ww, wh, win, glowWin);
+                Window(g, cx - 0.6f * s - ww / 2, gy - 0.44f * s, ww, wh, win, glowWin);
+                Window(g, cx + 0.6f * s - ww / 2, gy - 0.44f * s, ww, wh, win, glowWin);
+            }
+            Color pole = Art.Dark(shade, 0.6f);
+            for (int i = 0; i < tips.Count; i++) Pennant(g, tips[i], s, pole, flag, i % 2 == 1);
+        }
+
+        static void BattlementCaps(Graphics g, Color c, float x, float top, float w, float m)
+        {
+            int k = Math.Max(2, (int)(w / (m * 2)));
+            float sp = w / (2 * k - 1);
+            using (var b = new SolidBrush(c))
+                for (int i = 0; i < 2 * k - 1; i += 2)
+                    g.FillRectangle(b, x + i * sp - sp * 0.08f, top - m * 0.95f, sp * 1.16f, m * 0.32f);
+        }
+
+        void CottageLit(Graphics g, float x, float gy, float s, Color wall, Color wallShade, Color roof, Color roofShade, Color win, bool glowWin, Color cap)
+        {
+            FillRect(g, Art.Dark(roof, 0.75f), x + s * 0.68f, gy - s * 0.95f, s * 0.12f, s * 0.3f);
+            if (cap.A > 0) FillRect(g, cap, x + s * 0.66f, gy - s * 0.97f, s * 0.16f, s * 0.05f);
+            FillRect(g, wall, x, gy - s * 0.5f, s, s * 0.5f + 2);
+            FillRect(g, wallShade, x + s * 0.82f, gy - s * 0.5f, s * 0.18f, s * 0.5f + 2);
+            FillPoly(g, roof, x - s * 0.12f, gy - s * 0.48f, x + s * 1.12f, gy - s * 0.48f, x + s * 0.5f, gy - s * 0.95f);
+            FillPoly(g, roofShade, x + s * 0.5f, gy - s * 0.95f, x + s * 0.62f, gy - s * 0.48f, x + s * 1.12f, gy - s * 0.48f);
+            Window(g, x + s * 0.42f, gy - s * 0.28f, s * 0.16f, s * 0.28f, Art.C(0x6B4428), false);
+            foreach (float wx in new[] { 0.13f, 0.7f })
+            {
+                if (glowWin) Glow(g, x + s * (wx + 0.08f), gy - s * 0.28f, s * 0.2f, Color.FromArgb(110, win));
+                FillRect(g, win, x + s * wx, gy - s * 0.36f, s * 0.16f, s * 0.15f);
+                using (var pen = new Pen(Art.Dark(wall, 0.6f), Math.Max(1f, s * 0.02f)))
+                {
+                    g.DrawLine(pen, x + s * (wx + 0.08f), gy - s * 0.36f, x + s * (wx + 0.08f), gy - s * 0.21f);
+                    g.DrawLine(pen, x + s * wx, gy - s * 0.285f, x + s * (wx + 0.16f), gy - s * 0.285f);
+                }
+            }
+        }
+
+        static void RoundTree(Graphics g, float x, float gy, float h, Color leaf, Color leafDark, Color trunk)
+        {
+            FillRect(g, trunk, x - h * 0.05f, gy - h * 0.45f, h * 0.1f, h * 0.45f + 1);
+            FillCircle(g, leafDark, x, gy - h * 0.66f, h * 0.3f);
+            FillCircle(g, leafDark, x - h * 0.22f, gy - h * 0.5f, h * 0.22f);
+            FillCircle(g, leafDark, x + h * 0.22f, gy - h * 0.5f, h * 0.22f);
+            FillCircle(g, leaf, x - h * 0.05f, gy - h * 0.7f, h * 0.24f);
+            FillCircle(g, leaf, x - h * 0.24f, gy - h * 0.54f, h * 0.15f);
+            FillCircle(g, leaf, x + h * 0.14f, gy - h * 0.56f, h * 0.14f);
+            FillCircle(g, Color.FromArgb(70, 255, 255, 220), x - h * 0.12f, gy - h * 0.8f, h * 0.09f);
+        }
+
+        static void Windmill(Graphics g, float x, float gy, float s, float angle)
+        {
+            FillPoly(g, Art.C(0xF2E6CC), x - s * 0.18f, gy + 2, x + s * 0.18f, gy + 2, x + s * 0.12f, gy - s * 0.75f, x - s * 0.12f, gy - s * 0.75f);
+            FillPoly(g, Art.C(0xD9C8A6), x + s * 0.04f, gy + 2, x + s * 0.18f, gy + 2, x + s * 0.12f, gy - s * 0.75f, x + s * 0.03f, gy - s * 0.75f);
+            FillPoly(g, Art.C(0xC8443A), x - s * 0.17f, gy - s * 0.74f, x + s * 0.17f, gy - s * 0.74f, x, gy - s * 0.97f);
+            FillPoly(g, Art.C(0x9E3029), x, gy - s * 0.97f, x + s * 0.05f, gy - s * 0.74f, x + s * 0.17f, gy - s * 0.74f);
+            Window(g, x - s * 0.05f, gy - s * 0.2f, s * 0.1f, s * 0.2f, Art.C(0x6B4428), false);
+            Window(g, x - s * 0.03f, gy - s * 0.52f, s * 0.06f, s * 0.1f, Art.C(0x4A3B5C), false);
+            float hx = x, hy = gy - s * 0.78f;
+            for (int k = 0; k < 4; k++)
+            {
+                var st = g.Save();
+                g.TranslateTransform(hx, hy);
+                g.RotateTransform(angle + 90 * k);
+                using (var b = new SolidBrush(Color.FromArgb(235, 255, 248, 234))) g.FillRectangle(b, s * 0.08f, 0, s * 0.55f, s * 0.13f);
+                using (var pen = new Pen(Art.C(0x7A5230), Math.Max(1f, s * 0.018f)))
+                {
+                    g.DrawLine(pen, 0, 0, s * 0.65f, 0);
+                    for (int i = 1; i < 5; i++) g.DrawLine(pen, s * (0.08f + 0.11f * i), 0, s * (0.08f + 0.11f * i), s * 0.13f);
+                    g.DrawLine(pen, s * 0.08f, s * 0.13f, s * 0.63f, s * 0.13f);
+                }
+                g.Restore(st);
+            }
+            FillCircle(g, Art.C(0x7A5230), hx, hy, s * 0.035f);
+        }
+
+        static void Balloon(Graphics g, float x, float y, float s, Color a, Color b)
+        {
+            using (var env = new GraphicsPath(FillMode.Winding))
+            {
+                env.AddEllipse(x - s * 0.5f, y - s * 0.6f, s, s * 1.05f);
+                env.AddPolygon(new[] { new PointF(x - s * 0.44f, y + s * 0.1f), new PointF(x + s * 0.44f, y + s * 0.1f), new PointF(x + s * 0.14f, y + s * 0.58f), new PointF(x - s * 0.14f, y + s * 0.58f) });
+                using (var ab = new SolidBrush(a)) g.FillPath(ab, env);
+                var st = g.Save();
+                g.SetClip(env, CombineMode.Intersect);
+                using (var bb = new SolidBrush(b)) g.FillEllipse(bb, x - s * 0.32f, y - s * 0.7f, s * 0.64f, s * 1.4f);
+                using (var ab = new SolidBrush(a)) g.FillEllipse(ab, x - s * 0.13f, y - s * 0.7f, s * 0.26f, s * 1.4f);
+                using (var hb = new SolidBrush(Color.FromArgb(60, 255, 255, 255))) g.FillEllipse(hb, x - s * 0.42f, y - s * 0.52f, s * 0.36f, s * 0.5f);
+                using (var sh = new SolidBrush(Color.FromArgb(40, 0, 0, 40))) g.FillEllipse(sh, x + s * 0.1f, y - s * 0.6f, s * 0.6f, s * 1.3f);
+                g.Restore(st);
+            }
+            using (var pen = new Pen(Art.C(0x6B4428), Math.Max(1f, s * 0.02f)))
+            {
+                g.DrawLine(pen, x - s * 0.13f, y + s * 0.58f, x - s * 0.09f, y + s * 0.72f);
+                g.DrawLine(pen, x + s * 0.13f, y + s * 0.58f, x + s * 0.09f, y + s * 0.72f);
+            }
+            FillRect(g, Art.C(0x9C6A35), x - s * 0.11f, y + s * 0.72f, s * 0.22f, s * 0.15f);
+            FillRect(g, Art.C(0x7A5230), x - s * 0.11f, y + s * 0.72f, s * 0.22f, s * 0.035f);
+        }
+
+        // ---- theme 1: sunny meadow
+        void PaintMeadow(Graphics g, Random r)
+        {
+            float u = H / 1080f, horizon = H * 0.58f, side = boardX - frame;
+            float sunX = W - Math.Max(side * 0.4f, W * 0.08f), sunY = H * 0.14f;
+            float castleX = Math.Max(side * 0.5f, W * 0.1f);
+
+            Sky(g, horizon, new[] { Art.C(0x3A93DB), Art.C(0x67B8EE), Art.C(0xA6DAF6), Art.C(0xE6F6FC) }, new[] { 0f, 0.4f, 0.78f, 1f });
+
+            // sun and its soft rays
+            Glow(g, sunX, sunY, H * 0.55f, Color.FromArgb(100, 255, 248, 200));
+            using (var ray = new SolidBrush(Color.FromArgb(26, 255, 252, 225)))
+                for (int i = 0; i < 14; i++)
+                {
+                    double ang = i * Math.PI * 2 / 14 + 0.1;
+                    float len = H * 0.65f, spread = 0.07f;
+                    g.FillPolygon(ray, new[] { new PointF(sunX, sunY),
+                        new PointF(sunX + (float)Math.Cos(ang - spread) * len, sunY + (float)Math.Sin(ang - spread) * len),
+                        new PointF(sunX + (float)Math.Cos(ang + spread) * len, sunY + (float)Math.Sin(ang + spread) * len) });
+                }
+            Glow(g, sunX, sunY, H * 0.16f, Color.FromArgb(210, 255, 250, 215));
+            float sr = H * 0.062f;
+            using (var b = new LinearGradientBrush(new RectangleF(sunX - sr, sunY - sr, 2 * sr, 2 * sr), Art.C(0xFFFCE0), Art.C(0xFFD54F), 90f))
+                g.FillEllipse(b, sunX - sr, sunY - sr, 2 * sr, 2 * sr);
+
+            // rainbow over the castle
+            float rbx = castleX + side * 0.1f, rby = horizon + H * 0.06f, rbr = H * 0.4f, bw = H * 0.017f;
+            var bands = new[] { 0xFF5A5A, 0xFF9F40, 0xFFE05A, 0x6BD46B, 0x5AA8FF, 0x9A7BFF };
+            for (int i = 0; i < bands.Length; i++)
+            {
+                float rad = rbr - i * bw;
+                using (var pen = new Pen(Color.FromArgb(95, Art.C(bands[i])), bw + 1))
+                    g.DrawArc(pen, rbx - rad, rby - rad, 2 * rad, 2 * rad, 180, 180);
+            }
+
+            for (int i = 0; i < 8; i++)
+                PuffCloud(g, r, (float)r.NextDouble() * W, H * (0.1f + (float)r.NextDouble() * 0.32f), H * (0.06f + (float)r.NextDouble() * 0.06f),
+                          Color.FromArgb(240, 255, 255, 255), Color.FromArgb(230, 206, 224, 242));
+
+            Balloon(g, Math.Max(side * 0.2f, W * 0.05f), H * 0.2f, H * 0.06f, Art.C(0xEF5350), Art.C(0xFFD23F));
+            Balloon(g, W - Math.Max(side * 0.82f, W * 0.15f), H * 0.34f, H * 0.04f, Art.C(0x4D9DE0), Color.White);
+            Birds(g, r, W - side * 0.9f, W - side * 0.2f, H * 0.22f, H * 0.38f, 5, Color.FromArgb(150, 40, 60, 90), u);
+
+            // far blue mountains with snowy tops
+            var far = MakeRidge(r, 7, 0.55f);
+            FillRidgeStops(g, far, horizon + H * 0.02f, H * 0.22f,
+                new[] { Color.White, Art.C(0xDCE9F7), Art.C(0x9DBFE3), Art.C(0xB9D4EE), Art.C(0xC9DDF0) }, new[] { 0f, 0.05f, 0.12f, 0.3f, 1f });
+            Mist(g, horizon + H * 0.01f, H * 0.04f, Color.FromArgb(150, 235, 246, 252));
+
+            // green hills with little trees and a faraway castle
+            var mid = MakeRidge(r, 6, 0.45f);
+            float midBase = horizon + H * 0.08f, midAmp = H * 0.1f;
+            FillRidge(g, mid, midBase, midAmp, Art.C(0xA6D57E), Art.C(0x86C462));
+            float fcx = W - Math.Max(side * 0.55f, W * 0.12f);
+            CastleLit(g, fcx, RidgeY(mid, midBase, midAmp, fcx) + H * 0.008f, H * 0.06f, Art.C(0xD9D3E3), Art.C(0xB8B0C8),
+                      Art.C(0x6F8FC9), Art.C(0x5B78AE), Art.C(0x5A5070), Art.C(0xE24C4C), Color.Empty, false, false);
+            for (int i = 0; i < 46; i++)
+            {
+                float x = (float)r.NextDouble() * W, y = RidgeY(mid, midBase, midAmp, x) + H * (0.008f + (float)r.NextDouble() * 0.05f);
+                float t = H * (0.006f + (float)r.NextDouble() * 0.008f);
+                FillCircle(g, Art.C(0x5E9E48), x, y, t);
+                FillCircle(g, Art.C(0x79B85C), x - t * 0.3f, y - t * 0.3f, t * 0.55f);
+            }
+
+            var near = MakeRidge(r, 6, 0.5f);
+            FillRidge(g, near, horizon + H * 0.18f, H * 0.07f, Art.C(0x86C960), Art.C(0x63AD47));
+
+            // castle hill and village hill
+            float hillW = Math.Max(side * 1.9f, W * 0.3f), hillTopY = H * 0.68f;
+            using (var b = new LinearGradientBrush(new RectangleF(0, hillTopY, W, H - hillTopY), Art.C(0x74C450), Art.C(0x3F8F34), 90f))
+            {
+                g.FillEllipse(b, castleX - hillW * 0.75f, hillTopY, hillW * 1.5f, H * 0.7f);
+                g.FillEllipse(b, W - hillW * 0.95f, H * 0.76f, hillW * 1.4f, H * 0.6f);
+            }
+            float cs = Math.Max(H * 0.12f, Math.Min(side * 0.55f, H * 0.3f));
+            CastleLit(g, castleX, hillTopY + H * 0.012f, cs, Art.C(0xEDE4CF), Art.C(0xCDBE9F), Art.C(0x3F6FB5), Art.C(0x2E5490),
+                      Art.C(0x3B3350), Art.C(0xE24C4C), Color.Empty, false, true);
+
+            // village with a windmill
+            float vx = W - Math.Max(side * 0.75f, W * 0.15f), vgy = H * 0.785f;
+            Windmill(g, vx + cs * 0.55f, vgy + 2, cs * 0.75f, 20);
+            CottageLit(g, vx - cs * 0.2f, vgy + H * 0.008f, cs * 0.3f, Art.C(0xF6EBD3), Art.C(0xDCCBA8), Art.C(0xD25A43), Art.C(0xA8432F), Art.C(0x5A6E9C), false, Color.Empty);
+            CottageLit(g, vx + cs * 0.95f, vgy + H * 0.014f, cs * 0.24f, Art.C(0xF6EBD3), Art.C(0xDCCBA8), Art.C(0xE08A3C), Art.C(0xB86A2A), Art.C(0x5A6E9C), false, Color.Empty);
+
+            // trees at the edges
+            for (int i = 0; i < 12; i++)
+            {
+                float px = (float)r.NextDouble() * side * 0.9f;
+                if (i % 2 == 1) px = W - px;
+                float ph = H * (0.09f + (float)r.NextDouble() * 0.08f);
+                RoundTree(g, px, H * (0.87f + (float)r.NextDouble() * 0.07f), ph, Art.C(0x6DBE4E), Art.C(0x3F8F34), Art.C(0x7A5230));
+            }
+            var fg = MakeRidge(r, 6, 0.6f);
+            FillRidge(g, fg, H * 1.0f, H * 0.07f, Art.C(0x56A63E), Art.C(0x3E8C2F));
+
+            // flowers and grass
+            var petals = new[] { 0xFF6B6B, 0xFFD23F, 0xFFFFFF, 0xFF9ECF, 0xB28DFF, 0xFF9F40 };
+            using (var grass = new Pen(Color.FromArgb(120, 40, 110, 30), Math.Max(1f, 1.5f * u)))
+                for (int i = 0; i < 220; i++)
+                {
+                    float x = (float)r.NextDouble() * W, y = H * (0.88f + (float)r.NextDouble() * 0.12f);
+                    g.DrawLine(grass, x, y, x - 2 * u, y - 7 * u);
+                    g.DrawLine(grass, x, y, x + 3 * u, y - 6 * u);
+                }
+            for (int i = 0; i < 260; i++)
+            {
+                float x = (float)r.NextDouble() * W, y = H * (0.8f + (float)r.NextDouble() * 0.2f);
+                float fr = (2.2f + (float)r.NextDouble() * 2.5f) * u * (0.6f + (y - H * 0.8f) / (H * 0.2f) * 0.8f);
+                Color c = Art.C(petals[r.Next(petals.Length)]);
+                for (int k = 0; k < 5; k++)
+                {
+                    double a = k * Math.PI * 2 / 5;
+                    FillCircle(g, c, x + (float)Math.Cos(a) * fr, y + (float)Math.Sin(a) * fr, fr * 0.75f);
+                }
+                FillCircle(g, Art.C(0xFFB300), x, y, fr * 0.6f);
+            }
+        }
+
+        // ---- theme 2: snowy night with northern lights
+        void Aurora(Graphics g, Random r, float yBase, float amp, float len, Color c, int alpha)
+        {
+            float step = Math.Max(2f, 3 * H / 1080f);
+            double ph = r.NextDouble() * 6;
+            for (float x = 0; x < W; x += step)
+            {
+                double t = x / W;
+                float y = yBase + (float)(Math.Sin(t * 6.0 + ph) * 0.6 + Math.Sin(t * 13.0 + ph * 2) * 0.4) * amp;
+                float l = len * (0.6f + 0.4f * (float)Math.Sin(t * 9 + ph * 3));
+                int a = Clamp((int)(alpha * (0.45 + 0.55 * Math.Abs(Math.Sin(t * 17 + ph)))));
+                using (var b = Stops(x, step + 1, new[] { Color.FromArgb(0, c), Color.FromArgb(a / 3, c), Color.FromArgb(a, c), Color.FromArgb(0, c) },
+                                     new[] { y, y + l * 0.5f, y + l * 0.88f, y + l }))
+                    g.FillRectangle(b, x, y, step + 0.6f, l);
+            }
+        }
+
+        static void SnowPine(Graphics g, float x, float gy, float h, Brush dark, Color snow)
+        {
+            Pine(g, x, gy, h, dark);
+            float w = h * 0.36f;
+            for (int i = 0; i < 3; i++)
+            {
+                float top = gy - h + i * h * 0.24f, bot = gy - h * 0.12f - (2 - i) * h * 0.16f;
+                float hw = w * (0.45f + i * 0.28f);
+                float sb = top + (bot - top) * 0.42f, shw = hw * 0.42f;
+                FillPoly(g, snow, x, top - 1, x + shw, sb, x + shw * 0.4f, sb + h * 0.025f, x - shw * 0.3f, sb - h * 0.005f, x - shw, sb);
+                FillPoly(g, snow, x - hw, bot, x + hw, bot, x + hw * 0.75f, bot - h * 0.03f, x - hw * 0.75f, bot - h * 0.03f);
+            }
+        }
+
+        static void Snowman(Graphics g, float x, float gy, float s)
+        {
+            Color white = Art.C(0xFAFCFF), shade = Art.C(0xC9D6EE);
+            FillCircle(g, Color.FromArgb(60, 40, 60, 110), x + s * 0.06f, gy, s * 0.32f);
+            float[] cy = { gy - s * 0.28f, gy - s * 0.72f, gy - s * 1.04f }, cr = { s * 0.3f, s * 0.22f, s * 0.16f };
+            for (int i = 0; i < 3; i++)
+            {
+                FillCircle(g, shade, x, cy[i], cr[i]);
+                FillCircle(g, white, x - cr[i] * 0.12f, cy[i] - cr[i] * 0.1f, cr[i] * 0.88f);
+            }
+            using (var pen = new Pen(Art.C(0x6B4428), Math.Max(1.5f, s * 0.025f)))
+            {
+                g.DrawLine(pen, x - s * 0.2f, cy[1] - s * 0.02f, x - s * 0.45f, cy[1] - s * 0.2f);
+                g.DrawLine(pen, x + s * 0.2f, cy[1] - s * 0.02f, x + s * 0.45f, cy[1] - s * 0.22f);
+                g.DrawLine(pen, x - s * 0.38f, cy[1] - s * 0.14f, x - s * 0.44f, cy[1] - s * 0.08f);
+            }
+            FillRect(g, Art.C(0xD8343F), x - s * 0.19f, cy[1] - s * 0.22f, s * 0.38f, s * 0.07f);
+            FillRect(g, Art.C(0xD8343F), x + s * 0.06f, cy[1] - s * 0.18f, s * 0.07f, s * 0.2f);
+            Color coal = Art.C(0x2A2A3A);
+            FillCircle(g, coal, x - s * 0.06f, cy[2] - s * 0.04f, s * 0.022f);
+            FillCircle(g, coal, x + s * 0.05f, cy[2] - s * 0.04f, s * 0.022f);
+            for (int i = 0; i < 3; i++) FillCircle(g, coal, x, cy[1] + s * (-0.06f + 0.09f * i) + s * 0.04f, s * 0.022f);
+            FillPoly(g, Art.C(0xFF8A3D), x, cy[2] - s * 0.01f, x + s * 0.17f, cy[2] + s * 0.015f, x, cy[2] + s * 0.035f);
+            FillRect(g, coal, x - s * 0.17f, cy[2] - s * 0.15f, s * 0.34f, s * 0.04f);
+            FillRect(g, coal, x - s * 0.1f, cy[2] - s * 0.33f, s * 0.2f, s * 0.19f);
+            FillRect(g, Art.C(0xD8343F), x - s * 0.1f, cy[2] - s * 0.2f, s * 0.2f, s * 0.04f);
+        }
+
+        static void Smoke(Graphics g, Random r, float x, float y, float s)
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                float t = i / 5f;
+                FillCircle(g, Color.FromArgb(Clamp((int)(70 * (1 - t))), 220, 228, 245), x + s * (0.15f * t + 0.3f * t * t) + (float)(r.NextDouble() - 0.5) * s * 0.05f,
+                           y - s * 0.6f * t, s * (0.06f + 0.08f * t));
+            }
+        }
+
+        void PaintWinter(Graphics g, Random r)
+        {
+            float u = H / 1080f, horizon = H * 0.6f, side = boardX - frame;
+            float mx = Math.Max(side * 0.32f, W * 0.07f), my = H * 0.14f, mr = H * 0.055f;
+            Color win = Art.C(0xFFD27A), flag = Art.C(0xD8343F), snow = Art.C(0xF1F5FF);
+
+            Sky(g, horizon, new[] { Art.C(0x050A22), Art.C(0x0E1B4D), Art.C(0x22397A), Art.C(0x4A69A8), Art.C(0x7C97C9) }, new[] { 0f, 0.35f, 0.65f, 0.88f, 1f });
+
+            for (int i = 0; i < 320; i++)
+            {
+                float x = (float)r.NextDouble() * W, y = (float)Math.Pow(r.NextDouble(), 1.4) * horizon * 0.7f;
+                int a = Clamp((int)(240 * (1 - y / (horizon * 0.7f))));
+                float sz = (0.8f + (float)r.NextDouble() * 2f) * u;
+                FillCircle(g, Color.FromArgb(a, 235, 242, 255), x, y, sz / 2);
+                if (r.Next(12) == 0) Glow(g, x, y, sz * 4, Color.FromArgb(a / 3, 200, 220, 255));
+            }
+
+            Aurora(g, r, H * 0.1f, H * 0.05f, H * 0.2f, Art.C(0x9C7BFF), 45);
+            Aurora(g, r, H * 0.16f, H * 0.06f, H * 0.22f, Art.C(0x63F5B8), 75);
+
+            // full moon
+            Glow(g, mx, my, mr * 4.5f, Color.FromArgb(60, 200, 220, 255));
+            Glow(g, mx, my, mr * 1.8f, Color.FromArgb(90, 230, 240, 255));
+            FillCircle(g, Art.C(0xF4F6FF), mx, my, mr);
+            FillCircle(g, Art.C(0xDDE2F2), mx - mr * 0.3f, my - mr * 0.2f, mr * 0.22f);
+            FillCircle(g, Art.C(0xDDE2F2), mx + mr * 0.35f, my + mr * 0.25f, mr * 0.16f);
+            FillCircle(g, Art.C(0xE4E8F5), mx + mr * 0.1f, my - mr * 0.45f, mr * 0.1f);
+            FillCircle(g, Art.C(0xE4E8F5), mx - mr * 0.25f, my + mr * 0.45f, mr * 0.12f);
+
+            // snowy mountains
+            var far = MakeRidge(r, 7, 0.6f);
+            FillRidgeStops(g, far, horizon + H * 0.02f, H * 0.24f,
+                new[] { Art.C(0xF2F6FF), Art.C(0xC9D6EE), Art.C(0x8FA3CF), Art.C(0x7F95C6) }, new[] { 0f, 0.08f, 0.22f, 1f });
+            Mist(g, horizon, H * 0.05f, Color.FromArgb(120, 159, 179, 221));
+            var mid = MakeRidge(r, 7, 0.5f);
+            float midBase = horizon + H * 0.09f, midAmp = H * 0.16f;
+            FillRidgeStops(g, mid, midBase, midAmp,
+                new[] { Art.C(0xE3EAF8), Art.C(0xA9BADF), Art.C(0x6E85BA), Art.C(0x627AB0) }, new[] { 0f, 0.07f, 0.2f, 1f });
+            float fcx = W - Math.Max(side * 0.55f, W * 0.12f);
+            CastleLit(g, fcx, RidgeY(mid, midBase, midAmp, fcx) + H * 0.01f, H * 0.07f, Art.C(0x56689C), Art.C(0x48598A),
+                      snow, Art.C(0xC4D1EC), win, flag, snow, true, false);
+            Mist(g, midBase - H * 0.01f, H * 0.05f, Color.FromArgb(110, 159, 179, 221));
+            var near = MakeRidge(r, 6, 0.5f);
+            FillRidge(g, near, horizon + H * 0.16f, H * 0.09f, Art.C(0xC5D3EE), Art.C(0x8DA2CE));
+
+            // frozen lake with the moon in it
+            float lakeY = horizon + H * 0.2f;
+            using (var b = new LinearGradientBrush(new RectangleF(0, lakeY, W, H - lakeY + 1), Art.C(0x9DB3DE), Art.C(0x2F4278), 90f))
+                g.FillRectangle(b, 0, lakeY, W, H - lakeY);
+            for (int i = 0; i < 22; i++)
+            {
+                float ry = lakeY + (float)Math.Pow(i / 22.0, 1.3) * (H - lakeY) * 0.8f + 3 * u;
+                float rw = H * (0.03f + 0.06f * (float)r.NextDouble()) * (1 + i * 0.05f);
+                float rx = mx + (float)(r.NextDouble() - 0.5) * H * 0.04f;
+                FillRect(g, Color.FromArgb(Clamp(150 - i * 5), 235, 242, 255), rx - rw / 2, ry, rw, Math.Max(1.5f, 2.5f * u));
+            }
+            using (var crack = new Pen(Color.FromArgb(70, 255, 255, 255), Math.Max(1f, u)))
+                for (int i = 0; i < 14; i++)
+                {
+                    float x = (float)r.NextDouble() * W, y = lakeY + (float)r.NextDouble() * (H - lakeY) * 0.5f;
+                    g.DrawLines(crack, new[] { new PointF(x, y), new PointF(x + 20 * u, y + 4 * u), new PointF(x + 34 * u, y + 2 * u), new PointF(x + 50 * u, y + 7 * u) });
+                }
+
+            // snowy hills, castle and village
+            float hillW = Math.Max(side * 1.9f, W * 0.3f);
+            float castleX = Math.Max(side * 0.5f, W * 0.1f), hillTopY = H * 0.68f;
+            using (var b = new LinearGradientBrush(new RectangleF(0, hillTopY, W, H - hillTopY), Art.C(0xF3F7FF), Art.C(0xAFC0E2), 90f))
+            {
+                g.FillEllipse(b, castleX - hillW * 0.75f, hillTopY, hillW * 1.5f, H * 0.7f);
+                g.FillEllipse(b, W - hillW * 0.95f, H * 0.76f, hillW * 1.4f, H * 0.6f);
+            }
+            float cs = Math.Max(H * 0.12f, Math.Min(side * 0.55f, H * 0.3f));
+            CastleLit(g, castleX, hillTopY + H * 0.012f, cs, Art.C(0x4C5B8E), Art.C(0x3A4775), snow, Art.C(0xC4D1EC), win, flag, snow, true, true);
+
+            float vx = W - Math.Max(side * 0.75f, W * 0.15f), vgy = H * 0.785f;
+            Smoke(g, r, vx - cs * 0.2f + cs * 0.3f * 0.74f, vgy - cs * 0.3f * 0.95f, cs * 0.5f);
+            Smoke(g, r, vx + cs * 0.55f + cs * 0.26f * 0.74f, vgy - cs * 0.26f * 0.95f, cs * 0.45f);
+            CottageLit(g, vx - cs * 0.2f, vgy + H * 0.008f, cs * 0.3f, Art.C(0x6B5A78), Art.C(0x554763), snow, Art.C(0xC4D1EC), win, true, snow);
+            CottageLit(g, vx + cs * 0.55f, vgy + H * 0.012f, cs * 0.26f, Art.C(0x7A5A5A), Art.C(0x624848), snow, Art.C(0xC4D1EC), win, true, snow);
+            Snowman(g, vx + cs * 1.15f, H * 0.83f, cs * 0.32f);
+
+            using (var pb = new SolidBrush(Art.C(0x1F3A4E)))
+                for (int i = 0; i < 16; i++)
+                {
+                    float px = (float)r.NextDouble() * side * 0.9f;
+                    if (i % 2 == 1) px = W - px;
+                    float ph = H * (0.07f + (float)r.NextDouble() * 0.09f);
+                    SnowPine(g, px, H * (0.86f + (float)r.NextDouble() * 0.08f), ph, pb, snow);
+                }
+            var fg = MakeRidge(r, 6, 0.6f);
+            FillRidge(g, fg, H * 1.0f, H * 0.08f, Color.White, Art.C(0xD0DCF0));
+            for (int i = 0; i < 160; i++)
+            {
+                float x = (float)r.NextDouble() * W, y = H * (0.9f + (float)r.NextDouble() * 0.1f);
+                FillCircle(g, Color.FromArgb(150 + r.Next(100), 255, 255, 255), x, y, (0.8f + (float)r.NextDouble() * 1.5f) * u);
+            }
+        }
+
+        // ---- theme 3: seaside castle in the morning
+        static void Ship(Graphics g, float x, float y, float s, Color sail, Color stripe, Color flag)
+        {
+            FillRect(g, Color.FromArgb(50, 0, 30, 60), x - s * 0.45f, y + s * 0.03f, s * 0.9f, s * 0.05f);
+            using (var pen = new Pen(Art.C(0x5A3A22), Math.Max(1.5f, s * 0.03f))) g.DrawLine(pen, x, y - s * 0.16f, x, y - s * 1.02f);
+            FillRect(g, sail, x - s * 0.3f, y - s * 0.86f, s * 0.6f, s * 0.48f);
+            using (var b = new SolidBrush(sail)) g.FillEllipse(b, x - s * 0.3f, y - s * 0.48f, s * 0.6f, s * 0.18f);
+            FillRect(g, stripe, x - s * 0.3f, y - s * 0.72f, s * 0.6f, s * 0.1f);
+            FillRect(g, sail, x - s * 0.18f, y - s * 0.98f, s * 0.36f, s * 0.1f);
+            FillRect(g, Color.FromArgb(50, 120, 80, 40), x + s * 0.12f, y - s * 0.86f, s * 0.18f, s * 0.5f);
+            Pennant(g, new PointF(x, y - s * 1.0f), s * 1.4f, Art.C(0x5A3A22), flag, true);
+            FillPoly(g, Art.C(0x7A4A2A), x - s * 0.58f, y - s * 0.2f, x + s * 0.58f, y - s * 0.2f, x + s * 0.42f, y + s * 0.03f, x - s * 0.42f, y + s * 0.03f);
+            FillRect(g, Art.C(0xE2B455), x - s * 0.52f, y - s * 0.15f, s * 1.04f, s * 0.025f);
+            for (int i = 0; i < 4; i++) FillCircle(g, Art.C(0x3A2414), x - s * 0.27f + i * s * 0.18f, y - s * 0.07f, s * 0.025f);
+        }
+
+        static void Rock(Graphics g, float x, float gy, float s)
+        {
+            FillPoly(g, Art.C(0x5D5A6B), x - s, gy, x - s * 0.7f, gy - s * 0.55f, x - s * 0.1f, gy - s * 0.8f, x + s * 0.6f, gy - s * 0.5f, x + s, gy);
+            FillPoly(g, Art.C(0x7E7B8F), x - s * 0.7f, gy - s * 0.55f, x - s * 0.1f, gy - s * 0.8f, x + s * 0.1f, gy - s * 0.3f, x - s * 0.5f, gy - s * 0.2f);
+        }
+
+        static void Lighthouse(Graphics g, float x, float gy, float s)
+        {
+            // beams
+            using (var b = new SolidBrush(Color.FromArgb(28, 255, 240, 180)))
+            {
+                g.FillPolygon(b, new[] { new PointF(x, gy - s * 1.05f), new PointF(x - s * 3.5f, gy - s * 1.45f), new PointF(x - s * 3.5f, gy - s * 0.85f) });
+                g.FillPolygon(b, new[] { new PointF(x, gy - s * 1.05f), new PointF(x + s * 3.5f, gy - s * 1.35f), new PointF(x + s * 3.5f, gy - s * 0.95f) });
+            }
+            using (var body = new GraphicsPath())
+            {
+                body.AddPolygon(new[] { new PointF(x - s * 0.16f, gy), new PointF(x + s * 0.16f, gy), new PointF(x + s * 0.1f, gy - s * 0.92f), new PointF(x - s * 0.1f, gy - s * 0.92f) });
+                using (var wb = new SolidBrush(Art.C(0xF7F4EE))) g.FillPath(wb, body);
+                var st = g.Save();
+                g.SetClip(body, CombineMode.Intersect);
+                for (int i = 0; i < 3; i++) FillRect(g, Art.C(0xD8443A), x - s * 0.2f, gy - s * (0.2f + 0.28f * i), s * 0.4f, s * 0.13f);
+                FillRect(g, Color.FromArgb(45, 40, 40, 80), x + s * 0.03f, gy - s, s * 0.2f, s);
+                g.Restore(st);
+            }
+            FillRect(g, Art.C(0x3A3A4A), x - s * 0.15f, gy - s * 0.95f, s * 0.3f, s * 0.04f);
+            Glow(g, x, gy - s * 1.05f, s * 0.45f, Color.FromArgb(160, 255, 236, 150));
+            FillRect(g, Art.C(0xFFE58A), x - s * 0.08f, gy - s * 1.13f, s * 0.16f, s * 0.18f);
+            using (var pen = new Pen(Art.C(0x3A3A4A), Math.Max(1f, s * 0.015f)))
+            {
+                g.DrawLine(pen, x - s * 0.08f, gy - s * 1.13f, x - s * 0.08f, gy - s * 0.95f);
+                g.DrawLine(pen, x + s * 0.08f, gy - s * 1.13f, x + s * 0.08f, gy - s * 0.95f);
+                g.DrawLine(pen, x, gy - s * 1.13f, x, gy - s * 0.95f);
+            }
+            FillPoly(g, Art.C(0xD8443A), x - s * 0.12f, gy - s * 1.12f, x + s * 0.12f, gy - s * 1.12f, x, gy - s * 1.27f);
+            FillCircle(g, Art.C(0x3A3A4A), x, gy - s * 1.28f, s * 0.02f);
+        }
+
+        void PaintSeaside(Graphics g, Random r)
+        {
+            float u = H / 1080f, horizon = H * 0.56f, side = boardX - frame;
+            float sunX = W - Math.Max(side * 0.45f, W * 0.09f), sunY = horizon - H * 0.07f;
+
+            Sky(g, horizon, new[] { Art.C(0x3F78C2), Art.C(0x7FAEDF), Art.C(0xC4D7EC), Art.C(0xF7D5B5), Art.C(0xFFE3AE) }, new[] { 0f, 0.35f, 0.65f, 0.88f, 1f });
+
+            Glow(g, sunX, sunY, H * 0.5f, Color.FromArgb(120, 255, 214, 150));
+            Glow(g, sunX, sunY, H * 0.16f, Color.FromArgb(190, 255, 236, 190));
+            float sr = H * 0.06f;
+            using (var b = new LinearGradientBrush(new RectangleF(sunX - sr, sunY - sr, 2 * sr, 2 * sr), Art.C(0xFFF6D6), Art.C(0xFFC978), 90f))
+                g.FillEllipse(b, sunX - sr, sunY - sr, 2 * sr, 2 * sr);
+
+            for (int i = 0; i < 7; i++)
+            {
+                float cy = horizon * (0.2f + (float)r.NextDouble() * 0.6f), t = cy / horizon;
+                Cloud(g, r, (float)r.NextDouble() * W, cy, W * (0.1f + (float)r.NextDouble() * 0.14f),
+                      Color.FromArgb(150, Mix(Art.C(0xF4F7FF), Art.C(0xF7D3D6), t)), Color.FromArgb(170, Mix(Art.C(0xFFFFFF), Art.C(0xFFE6C4), t)));
+            }
+            for (int i = 0; i < 4; i++)
+                PuffCloud(g, r, (float)r.NextDouble() * W, H * (0.08f + (float)r.NextDouble() * 0.15f), H * (0.04f + (float)r.NextDouble() * 0.04f),
+                          Color.FromArgb(235, 255, 255, 255), Color.FromArgb(220, 214, 222, 240));
+            Birds(g, r, side * 0.1f, side * 0.9f, H * 0.12f, H * 0.3f, 4, Color.FromArgb(160, 60, 70, 90), u);
+            Birds(g, r, W - side * 0.9f, W - side * 0.1f, H * 0.15f, H * 0.3f, 4, Color.FromArgb(160, 60, 70, 90), u);
+
+            // faraway islands, one with a tiny castle
+            Island(g, r, W * 0.18f, W * 0.42f, horizon + 1, H * 0.06f, Art.C(0x9AA6CB), Art.C(0xB6BFD9));
+            Island(g, r, W * 0.7f, W * 0.86f, horizon + 1, H * 0.035f, Art.C(0xA5B0D2), Art.C(0xBEC6DD));
+            Castle(g, W * 0.3f, horizon - H * 0.02f, H * 0.04f, Art.C(0x8E98BF), Art.C(0xFFE3AE), Art.C(0x8E98BF), false);
+
+            // the sea, the sun's path and little waves
+            using (var b = Stops(0, W, new[] { Art.C(0x7FC0DB), Art.C(0x3E8EBD), Art.C(0x1F5F8F), Art.C(0x174E7A) }, new[] { horizon, horizon + H * 0.08f, H * 0.8f, H + 1 }))
+                g.FillRectangle(b, 0, horizon, W, H - horizon);
+            for (int i = 0; i < 26; i++)
+            {
+                float ry = horizon + (float)Math.Pow(i / 26.0, 1.3) * (H - horizon) * 0.8f + 3 * u;
+                float rw = H * (0.05f + 0.1f * (float)r.NextDouble()) * (1 + i * 0.05f);
+                float rx = sunX + (float)(r.NextDouble() - 0.5) * H * 0.05f;
+                FillRect(g, Color.FromArgb(Clamp(190 - i * 6), 255, 236, 180), rx - rw / 2, ry, rw, Math.Max(1.5f, 2.5f * u));
+            }
+            for (int i = 0; i < 320; i++)
+            {
+                float t = (float)Math.Pow(r.NextDouble(), 1.3), y = horizon + H * 0.01f + t * (H - horizon);
+                float len = (5 + 34 * t) * u, x = (float)r.NextDouble() * W;
+                using (var pen = new Pen(Color.FromArgb(50 + r.Next(70), 255, 255, 255), Math.Max(1f, (1 + 2 * t) * u)))
+                    g.DrawArc(pen, x, y, len, len * 0.35f, 200, 140);
+            }
+
+            Ship(g, Math.Max(side * 0.85f, W * 0.15f), horizon + H * 0.04f, H * 0.045f, Art.C(0xFBF3E2), Art.C(0x3E7BD6), Art.C(0xFFD23F));
+            Ship(g, W - Math.Max(side * 0.8f, W * 0.14f), horizon + H * 0.12f, H * 0.085f, Art.C(0xFBF3E2), Art.C(0xD8443A), Art.C(0x3E7BD6));
+
+            // the castle cliff
+            float cliffW = Math.Max(side * 1.05f, W * 0.2f), cliffTop = H * 0.66f;
+            float castleX = Math.Max(side * 0.45f, W * 0.09f);
+            var cliff = new List<PointF> { new PointF(-2, H + 2), new PointF(-2, cliffTop + H * 0.01f) };
+            for (int i = 0; i <= 10; i++) cliff.Add(new PointF(cliffW * 0.85f * i / 10f, cliffTop + (float)(r.NextDouble() - 0.5) * H * 0.012f + (i > 7 ? (i - 7) * H * 0.008f : 0)));
+            cliff.Add(new PointF(cliffW * 0.95f, cliffTop + H * 0.07f));
+            cliff.Add(new PointF(cliffW * 0.9f, cliffTop + H * 0.12f));
+            cliff.Add(new PointF(cliffW * 1.05f, cliffTop + H * 0.2f));
+            cliff.Add(new PointF(cliffW * 1.15f, H + 2));
+            using (var b = new LinearGradientBrush(new RectangleF(0, cliffTop - 1, W, H - cliffTop + 3), Art.C(0xC99E78), Art.C(0x7A5640), 90f))
+                g.FillPolygon(b, cliff.ToArray());
+            var st0 = g.Save();
+            using (var clip = new GraphicsPath()) { clip.AddPolygon(cliff.ToArray()); g.SetClip(clip, CombineMode.Intersect); }
+            for (int i = 0; i < 26; i++)
+            {
+                float bx = (float)r.NextDouble() * cliffW * 1.1f, by = cliffTop + H * 0.03f + (float)r.NextDouble() * (H - cliffTop);
+                float bw = H * (0.04f + (float)r.NextDouble() * 0.07f), bh = bw * (0.35f + (float)r.NextDouble() * 0.25f);
+                using (var b = new SolidBrush(Color.FromArgb(40, 255, 235, 200))) g.FillEllipse(b, bx - bw / 2, by - bh / 2, bw, bh);
+                using (var b = new SolidBrush(Color.FromArgb(45, 70, 35, 15))) g.FillEllipse(b, bx - bw / 2 + bw * 0.08f, by, bw * 0.9f, bh * 0.5f);
+            }
+            using (var pen = new Pen(Color.FromArgb(60, 70, 35, 15), Math.Max(1f, 1.6f * u)))
+                for (int i = 0; i < 10; i++)
+                {
+                    float x = (float)r.NextDouble() * cliffW, y = cliffTop + H * 0.03f + (float)r.NextDouble() * (H - cliffTop) * 0.7f;
+                    g.DrawLines(pen, new[] { new PointF(x, y), new PointF(x + 6 * u, y + 18 * u), new PointF(x + 2 * u, y + 34 * u), new PointF(x + 9 * u, y + 52 * u) });
+                }
+            g.Restore(st0);
+            using (var grass = new GraphicsPath(FillMode.Winding))
+            {
+                var top = new List<PointF>();
+                for (int i = 2; i < 13; i++) top.Add(cliff[i]);
+                for (int i = 12; i >= 2; i--) top.Add(new PointF(cliff[i].X, cliff[i].Y + H * (0.018f + 0.01f * (i % 3))));
+                grass.AddPolygon(top.ToArray());
+                using (var gb = new SolidBrush(Art.C(0x7DBB5A))) g.FillPath(gb, grass);
+            }
+            float cs = Math.Max(H * 0.12f, Math.Min(side * 0.5f, H * 0.28f));
+            CastleLit(g, castleX, cliffTop + H * 0.006f, cs, Art.C(0xF1DEC4), Art.C(0xD3B596), Art.C(0xD0573F), Art.C(0xA8432F),
+                      Art.C(0x4A3B5C), Art.C(0x2F6FC0), Color.Empty, false, true);
+
+            // lighthouse on the rocks
+            float lhx = W - Math.Max(side * 0.3f, W * 0.06f), rocksY = H * 0.75f;
+            float ls = Math.Max(H * 0.14f, Math.Min(side * 0.4f, H * 0.24f));
+            using (var b = new SolidBrush(Color.FromArgb(120, 255, 255, 255))) g.FillEllipse(b, lhx - ls * 0.6f, rocksY + H * 0.008f, ls * 1.2f, H * 0.018f);
+            Rock(g, lhx - ls * 0.2f, rocksY + H * 0.004f, ls * 0.28f);
+            Rock(g, lhx + ls * 0.22f, rocksY + H * 0.006f, ls * 0.22f);
+            Lighthouse(g, lhx, rocksY - H * 0.004f, ls);
+            Rock(g, lhx - ls * 0.38f, rocksY + H * 0.012f, ls * 0.16f);
+            Rock(g, lhx + ls * 0.02f, rocksY + H * 0.014f, ls * 0.2f);
+            Rock(g, lhx + ls * 0.42f, rocksY + H * 0.012f, ls * 0.13f);
+
+            // sandy beach with shells, starfish and a sandcastle
+            var beach = MakeRidge(r, 6, 0.4f);
+            float beachBase = H * 0.99f, beachAmp = H * 0.08f;
+            var foamPts = new PointF[beach.Length];
+            for (int i = 0; i < beach.Length; i++) foamPts[i] = new PointF(W * i / (float)(beach.Length - 1), beachBase - beach[i] * beachAmp - 2 * u);
+            using (var wet = new Pen(Color.FromArgb(120, 120, 200, 210), 10 * u)) g.DrawLines(wet, foamPts);
+            FillRidge(g, beach, beachBase, beachAmp, Art.C(0xF5DDA8), Art.C(0xE2BC80));
+            using (var foam = new Pen(Color.FromArgb(200, 255, 255, 255), Math.Max(1.5f, 3 * u))) g.DrawLines(foam, foamPts);
+            for (int i = 0; i < 6; i++)
+            {
+                float x = (float)r.NextDouble() * side * 0.9f;
+                if (i % 2 == 1) x = W - x;
+                float y = H * (0.95f + (float)r.NextDouble() * 0.04f);
+                if (i < 3)
+                {
+                    using (var p = Art.Star(x, y, H * 0.016f)) using (var b = new SolidBrush(Art.C(0xFF8A5B))) g.FillPath(b, p);
+                }
+                else
+                {
+                    float sh = H * 0.012f;
+                    using (var b = new SolidBrush(Art.C(0xF7B7C8))) g.FillPie(b, x - sh, y - sh, 2 * sh, 2 * sh, 180, 180);
+                    using (var pen = new Pen(Art.C(0xD98AA0), Math.Max(1f, u)))
+                        for (int k = 1; k < 4; k++) g.DrawLine(pen, x, y, x + (float)Math.Cos(Math.PI + k * Math.PI / 4) * sh, y + (float)Math.Sin(Math.PI + k * Math.PI / 4) * sh);
+                }
+            }
+            float sx = W - Math.Max(side * 0.7f, W * 0.13f);
+            CastleLit(g, sx, H * 0.965f, H * 0.075f, Art.C(0xEBCB8F), Art.C(0xCFAA6E), Art.C(0xE0BE80), Art.C(0xC59F62),
+                      Art.C(0xB48F58), Art.C(0xEF5350), Color.Empty, false, true);
+        }
+
+        // ---------------------------------------------------------- theme animations
+        static float Hash(int i, double k) { return (float)(Math.Abs(Math.Sin(i * k) * 43758.5453) % 1.0); }
+
+        void DrawAmbient(Graphics g)
+        {
+            switch (Theme)
+            {
+                case 1: DrawButterflies(g); break;
+                case 2: DrawSnow(g); break;
+                case 3: DrawSeaLife(g); break;
+                default: DrawFireflies(g); break;
+            }
+        }
+
+        void DrawButterflies(Graphics g)
+        {
+            float side = boardX - frame;
+            if (side < H * 0.05f) return;
+            var wings = new[] { 0xFF8A3D, 0xFFD23F, 0xE76FB0, 0x4D9DE0, 0xFFFFFF, 0x9B6BD6 };
+            for (int i = 0; i < 8; i++)
+            {
+                float bx = Hash(i + 1, 12.9898) * side * 0.8f + side * 0.1f;
+                if (i % 2 == 1) bx = W - bx;
+                float by = H * (0.45f + 0.4f * Hash(i + 1, 78.233));
+                float t = Time * (0.35f + 0.15f * Hash(i + 1, 4.1)) + i * 1.3f;
+                float x = bx + (float)(Math.Sin(t) * 0.7 + Math.Sin(t * 2.3) * 0.3) * side * 0.12f;
+                float y = by + (float)(Math.Sin(t * 1.7) * 0.6 + Math.Cos(t * 0.9) * 0.4) * H * 0.04f;
+                float s = H * 0.014f, ww = s * (0.2f + 0.8f * Math.Abs((float)Math.Sin(Time * 12 + i * 2)));
+                Color c = Art.C(wings[i % wings.Length]);
+                using (var b = new SolidBrush(c)) using (var d = new SolidBrush(Art.Dark(c, 0.78f)))
+                {
+                    g.FillEllipse(b, x - ww, y - s * 0.9f, ww, s);
+                    g.FillEllipse(b, x, y - s * 0.9f, ww, s);
+                    g.FillEllipse(d, x - ww * 0.8f, y - s * 0.1f, ww * 0.8f, s * 0.7f);
+                    g.FillEllipse(d, x, y - s * 0.1f, ww * 0.8f, s * 0.7f);
+                }
+                using (var pen = new Pen(Art.C(0x3A2A20), Math.Max(1.5f, s * 0.18f))) g.DrawLine(pen, x, y - s * 0.7f, x, y + s * 0.55f);
+            }
+        }
+
+        void DrawSnow(Graphics g)
+        {
+            using (var b = new SolidBrush(Color.FromArgb(200, 255, 255, 255)))
+                for (int i = 0; i < 90; i++)
+                {
+                    float speed = H * (0.04f + 0.05f * Hash(i + 1, 3.7));
+                    float y = (Hash(i + 1, 78.233) * (H + 40) + Time * speed) % (H + 40) - 20;
+                    float x = Hash(i + 1, 12.9898) * W + (float)Math.Sin(Time * 0.8 + i) * H * 0.02f;
+                    float rad = H * (0.0018f + 0.0028f * Hash(i + 1, 5.3));
+                    g.FillEllipse(b, x - rad, y - rad, 2 * rad, 2 * rad);
+                }
+        }
+
+        void DrawSeaLife(Graphics g)
+        {
+            float side = boardX - frame;
+            float horizon = H * 0.56f, sunX = W - Math.Max(side * 0.45f, W * 0.09f);
+            // glitter on the water under the sun
+            for (int i = 0; i < 16; i++)
+            {
+                float x = sunX + (Hash(i + 1, 12.9898) - 0.5f) * H * 0.22f;
+                float y = horizon + H * 0.02f + Hash(i + 1, 78.233) * H * 0.2f;
+                float tw = (float)Math.Sin(Time * 3 + i * 1.7);
+                if (tw <= 0 || (x > boardX - frame - H * 0.02f && x < boardX + 8 * sq + frame + H * 0.02f)) continue;
+                float rad = H * 0.006f * tw;
+                Glow(g, x, y, rad * 3, Color.FromArgb(Clamp((int)(160 * tw)), 255, 245, 210));
+                FillPoly(g, Color.FromArgb(Clamp((int)(230 * tw)), 255, 255, 255), x - rad * 2, y, x, y - rad * 0.4f, x + rad * 2, y, x, y + rad * 0.4f);
+                FillPoly(g, Color.FromArgb(Clamp((int)(230 * tw)), 255, 255, 255), x, y - rad * 1.5f, x + rad * 0.4f, y, x, y + rad * 1.5f, x - rad * 0.4f, y);
+            }
+            // seagulls circling beside the board
+            if (side < H * 0.05f) return;
+            using (var pen = new Pen(Color.FromArgb(230, 250, 250, 255), Math.Max(1.5f, H * 0.003f)))
+            using (var dark = new Pen(Color.FromArgb(200, 70, 80, 100), Math.Max(1.5f, H * 0.003f)))
+                for (int i = 0; i < 5; i++)
+                {
+                    float bx = Hash(i + 1, 9.17) * side * 0.6f + side * 0.2f;
+                    if (i % 2 == 1) bx = W - bx;
+                    float by = H * (0.12f + 0.25f * Hash(i + 1, 33.1));
+                    float t = Time * (0.25f + 0.1f * Hash(i + 1, 2.3)) + i * 2f;
+                    float x = bx + (float)Math.Cos(t) * side * 0.18f, y = by + (float)Math.Sin(t) * H * 0.035f;
+                    float s = H * 0.016f, flap = (float)Math.Sin(Time * 5 + i) * s * 0.35f;
+                    var pts = new[] { new PointF(x - s, y - flap), new PointF(x - s * 0.45f, y - s * 0.3f), new PointF(x, y), new PointF(x + s * 0.45f, y - s * 0.3f), new PointF(x + s, y - flap) };
+                    g.DrawLines(dark, new[] { pts[0], new PointF(pts[0].X + s * 0.15f, pts[0].Y + s * 0.02f) });
+                    g.DrawCurve(pen, pts, 0.4f);
+                }
+        }
+
+        // ---------------------------------------------------------- theme switching
+        public static readonly string[] ThemeNames = { "Castle at Dusk", "Sunny Meadow", "Snowy Night", "Seaside Castle" };
+        public const float ThemeSeconds = 240f; // a new scene every 4 minutes
+        const float RevealTime = 1.6f;
+        public int Theme { get; private set; }
+        float themeSince;
+        Bitmap oldBackground; float revealBorn = -100;
+
+        static int WrapTheme(int t) { int n = ThemeNames.Length; return ((t % n) + n) % n; }
+
+        public void SetTheme(int t, bool announce)
+        {
+            t = WrapTheme(t);
+            themeSince = Time;
+            if (t == Theme && background != null) return;
+            Theme = t;
+            if (background == null) return;
+            if (oldBackground != null) oldBackground.Dispose();
+            oldBackground = background;
+            background = BuildBackground();
+            revealBorn = Time;
+            if (announce) { SetCaption(ThemeNames[t]); Tune(new[] { 7, 5, 3, 5, 7, 10 }, 0.1f, 0.45f); }
+        }
+
+        public void NextTheme() { SetTheme(Theme + 1, true); }
+
+        // the new scene opens up from the middle in a growing circle, with a ring of sparkles at its edge
+        void DrawReveal(Graphics g)
+        {
+            float k = (Time - revealBorn) / RevealTime;
+            if (k >= 1 || k < 0) { oldBackground.Dispose(); oldBackground = null; return; }
+            float e = k * k * (3 - 2 * k);
+            float rad = e * ((float)Math.Sqrt((double)W * W + (double)H * H) / 2 + 4);
+            using (var hole = new GraphicsPath())
+            {
+                hole.AddEllipse(W / 2f - rad, H / 2f - rad, 2 * rad, 2 * rad);
+                var st = g.Save();
+                g.SetClip(hole, CombineMode.Exclude);
+                g.DrawImageUnscaled(oldBackground, 0, 0);
+                g.Restore(st);
+            }
+            int a = Clamp((int)(230 * Math.Min(1, (1 - k) * 3)));
+            for (int i = 0; i < 30; i++)
+            {
+                double ang = i * Math.PI * 2 / 30 + Time * 0.9;
+                float x = W / 2f + (float)Math.Cos(ang) * rad, y = H / 2f + (float)Math.Sin(ang) * rad;
+                Glow(g, x, y, H * 0.03f, Color.FromArgb(a / 2, 255, 225, 130));
+                FillCircle(g, Color.FromArgb(a, 255, 250, 220), x, y, H * 0.005f);
+            }
         }
 
         // fireflies drifting beside the board (animated, cheap)
@@ -1942,8 +2885,9 @@ namespace LittleKnight
             g.InterpolationMode = InterpolationMode.NearestNeighbor;
             g.DrawImageUnscaled(background, 0, 0);
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            if (oldBackground != null) { try { DrawReveal(g); } catch { } }
 
-            try { DrawFireflies(g); } catch { }
+            try { DrawAmbient(g); } catch { }
             if (hint != null) { try { DrawHint(g); } catch { } }
             foreach (var s in sprites) if (Time >= s.Born) { try { DrawSprite(g, s); } catch { } }
 
@@ -2046,7 +2990,7 @@ namespace LittleKnight
             const float life = 8f;
             if (Time > life) return;
             int a = Clamp((int)(255 * Math.Min(1f, (life - Time) * 1.5f)));
-            string text = "Parents: to exit, hold Ctrl + Alt and type Q U I T";
+            string text = "Parents: to exit, hold Ctrl + Alt and type Q U I T   \u00b7   Ctrl + Alt + N shows the next scene";
             using (var f = new Font(Art.UiFont, Math.Max(12, H * 0.024f), FontStyle.Bold, GraphicsUnit.Pixel))
             {
                 SizeF sz = g.MeasureString(text, f);
@@ -2110,6 +3054,28 @@ namespace LittleKnight
                 b.Draw(g);
                 bmp.Save(file, ImageFormat.Png);
             }
+        }
+
+        // One picture per theme (prefix0.png ...), a smaller 5:4 screen, and a frame from the middle of a scene change.
+        public static void Themes(string prefix)
+        {
+            for (int t = 0; t < ThemeNames.Length; t++)
+            {
+                var s = new Scene(1920, 1080, 1, t);
+                for (int i = 0; i < 20; i++) s.Update(0.1f);
+                s.OnKey('K'); s.Update(0.5f);
+                s.OnClick((int)(s.boardX + 2.5f * s.sq), (int)(s.boardY + 4.5f * s.sq), false);
+                s.Update(0.5f);
+                using (var bmp = new Bitmap(s.W, s.H))
+                using (var g = Graphics.FromImage(bmp)) { s.Draw(g); bmp.Save(prefix + t + ".png", ImageFormat.Png); }
+            }
+            var small = new Scene(1280, 1024, 1, 3);
+            using (var bmp = new Bitmap(small.W, small.H))
+            using (var g = Graphics.FromImage(bmp)) { small.Draw(g); bmp.Save(prefix + "small.png", ImageFormat.Png); }
+            var sw = new Scene(1920, 1080, 1, 0);
+            sw.Update(1f); sw.NextTheme(); sw.Update(0.7f);
+            using (var bmp = new Bitmap(sw.W, sw.H))
+            using (var g = Graphics.FromImage(bmp)) { sw.Draw(g); bmp.Save(prefix + "reveal.png", ImageFormat.Png); }
         }
 
         public static void Gallery(string file)

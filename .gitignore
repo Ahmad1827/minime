@@ -1,3 +1,6 @@
 # build output (published as a GitHub release asset instead)
 *.exe
 *.pdb
+build/
+*.apk
+*.idsig
