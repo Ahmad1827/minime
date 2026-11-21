@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build LittleKnight.apk with the plain Android SDK tools (no Gradle needed).
+# Build ForYusef.apk with the plain Android SDK tools (no Gradle needed).
 # Needs: JDK 17, Android SDK with build-tools 35 and platform android-35.
 set -e
 cd "$(dirname "$0")"
@@ -34,6 +34,6 @@ cp "$OUT/base.apk" "$OUT/unsigned.apk"
 (cd "$OUT/dex" && zip -q -X ../unsigned.apk classes.dex)
 "$BT/zipalign" -p -f 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-  --out LittleKnight.apk "$OUT/aligned.apk"
-"$BT/apksigner" verify LittleKnight.apk
-echo "Built LittleKnight.apk"
+  --out ForYusef.apk "$OUT/aligned.apk"
+"$BT/apksigner" verify ForYusef.apk
+echo "Built ForYusef.apk"

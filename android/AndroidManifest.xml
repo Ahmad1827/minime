@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.minime.littleknight">
+    package="com.foryusef">
     <application
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -8,8 +8,9 @@
         android:theme="@style/Game"
         android:allowBackup="false"
         android:hardwareAccelerated="true">
+        <!-- the menu: opens first -->
         <activity
-            android:name=".MainActivity"
+            android:name=".MenuActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
@@ -20,5 +21,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- one game, pinned to the screen -->
+        <activity
+            android:name=".GameActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"/>
     </application>
 </manifest>

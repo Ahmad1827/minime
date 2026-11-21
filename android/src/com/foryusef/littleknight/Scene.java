@@ -1,4 +1,4 @@
-package com.minime.littleknight;
+package com.foryusef.littleknight;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;

@@ -1,4 +1,4 @@
-package com.minime.littleknight;
+package com.foryusef;
 
 import android.app.Activity;
 import android.app.ActivityManager;
@@ -13,15 +13,16 @@ import android.view.WindowManager;
 import android.window.OnBackInvokedDispatcher;
 
 /**
- * Little Knight for Android. Pins itself to the screen (Android "screen pinning" / lock task),
- * so Home, Recents and the notification shade do nothing until a parent exits.
- * PARENT EXIT: hold one finger on the top-left corner and one on the top-right corner for 3 seconds.
- * NEXT SCENE: hold one finger on each bottom corner for 1.5 seconds (scenes also change by themselves every few minutes).
+ * Runs one game, pinned to the screen (Android "screen pinning" / lock task),
+ * so Home, Recents and the notification shade do nothing until a parent goes back to the menu.
+ * PARENT, BACK TO THE MENU: hold one finger on the top-left corner and one on the top-right corner for 3 seconds.
+ * PARENT, NEXT SCENE: hold one finger on each bottom corner for 1.5 seconds.
  */
-public final class MainActivity extends Activity implements GameView.Listener {
+public final class GameActivity extends Activity implements GameView.Listener {
     private final Harp harp = new Harp();
     private GameView view;
     private boolean exiting;
+    static final String EXTRA_GAME = "game";
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -29,7 +30,9 @@ public final class MainActivity extends Activity implements GameView.Listener {
         w.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON | WindowManager.LayoutParams.FLAG_FULLSCREEN);
         if (Build.VERSION.SDK_INT >= 28)
             w.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        view = new GameView(this, harp, this);
+        int index = getIntent().getIntExtra(EXTRA_GAME, 0);
+        GameInfo info = Catalog.ALL[Math.max(0, Math.min(Catalog.ALL.length - 1, index))];
+        view = new GameView(this, info, harp, this);
         setContentView(view);
         if (Build.VERSION.SDK_INT >= 33)
             getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_OVERLAY, () -> { });
@@ -84,7 +87,7 @@ public final class MainActivity extends Activity implements GameView.Listener {
         if (exiting) return;
         exiting = true;
         try { stopLockTask(); } catch (RuntimeException ignored) { }
-        finishAndRemoveTask();
+        finish(); // back to the menu
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
