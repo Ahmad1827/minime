@@ -55,6 +55,7 @@ namespace ForYusef
         public static readonly List<GameInfo> All = new List<GameInfo>
         {
             LittleKnight.LittleKnightGame.Info,
+            LittlePilot.PilotGame.Info,
             // next game goes here
         };
     }

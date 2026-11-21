@@ -9,6 +9,7 @@
 // Written for C# 5 (the csc.exe bundled with .NET Framework 4.x).
 // Previews without locking anything:
 //   ForYusef.exe --menu out.png
+//   ForYusef.exe --pilot prefix   (Little Pilot: one picture per sky, plus a sky change)
 //   ForYusef.exe --snapshot out.png  /  --gallery out.png  /  --mirror out.png  /  --themes prefix   (Little Knight)
 
 using System;
@@ -30,6 +31,7 @@ namespace ForYusef
                 switch (args[0])
                 {
                     case "--menu": MenuView.Snapshot(args[1], 1920, 1080); return;
+                    case "--pilot": ForYusef.LittlePilot.PilotGame.Snapshot(args[1]); return;
                     case "--snapshot": LK.Scene.Snapshot(args[1]); return;
                     case "--gallery": LK.Scene.Gallery(args[1]); return;
                     case "--mirror": LK.Scene.Mirror(args[1]); return;
